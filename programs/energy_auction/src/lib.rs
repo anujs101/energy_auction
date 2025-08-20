@@ -22,7 +22,26 @@ pub mod energy_auction {
         Ok(())
     }
 
-    // TODO: add open_timeslot, commit_supply, place_bid, settle, redeem...
+    /// Seller commits supply (one-time per (global_state, timeslot, seller))
+    pub fn commit_supply(ctx: Context<CommitSupply>, timeslot: u64, amount: u64) -> Result<()> {
+        let supply = &mut ctx.accounts.supply;
+
+        // initialize supply account fields (immutable after init)
+        supply.supplier = ctx.accounts.signer.key();
+        supply.timeslot = timeslot;
+        supply.amount = amount;
+        supply.bump = ctx.bumps.supply;
+
+        emit!(SupplyCommitted {
+            supplier: supply.supplier,
+            timeslot,
+            amount,
+        });
+
+        Ok(())
+    }
+
+    // TODO: add open_timeslot, place_bid, settle, redeem...
 }
 
 ///////////////////////
@@ -40,7 +59,7 @@ pub struct InitGlobalState<'info> {
     )]
     pub global_state: Account<'info, GlobalState>,
 
-    pub quote_mint: Account<'info, Mint>, // USDC or SOL-wrapped token
+    pub quote_mint: Account<'info, Mint>, // USDC or other quote token
 
     #[account(
         init,
@@ -57,61 +76,47 @@ pub struct InitGlobalState<'info> {
 
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
-    pub rent: Sysvar<'info, Rent>,
+    // rent removed (not used in MVP)
 }
 
-/// Seller commits supply for a specific timeslot
+/// Seller commits supply for a specific timeslot (one-time)
 #[derive(Accounts)]
+#[instruction(timeslot: u64)]
 pub struct CommitSupply<'info> {
-    /// Global protocol state, must match seller’s authority
-    #[account(
-        mut,
-        has_one = authority @ EnergyAuctionError::InvalidAuthority,
-    )]
+    /// Global protocol state (read/write allowed)
+    #[account(mut)]
     pub global_state: Account<'info, GlobalState>,
 
-    /// Authority that controls the global state
-    pub authority: Signer<'info>,
-
-    /// Seller committing energy supply
-    #[account(mut)]
-    pub seller: Signer<'info>,
-
-    /// Supply account storing committed kWh for this timeslot
+    /// Supply account for this (global_state, timeslot, signer).
+    /// init-only: cannot be recreated if exists.
     #[account(
         init,
-        payer = seller,
+        payer = signer,
         space = 8 + Supply::LEN,
-        seeds = [b"supply", timeslot.key().as_ref(), seller.key().as_ref()],
+        seeds = [b"commit", global_state.key().as_ref(), &timeslot.to_le_bytes(), signer.key().as_ref()],
         bump
     )]
     pub supply: Account<'info, Supply>,
 
-    /// Timeslot this supply belongs to
-    pub timeslot: Account<'info, Timeslot>,
+    /// Seller committing energy (payer & signer)
+    #[account(mut)]
+    pub signer: Signer<'info>,
 
-    /// PDA token account holding seller’s escrowed kWh tokens
-    #[account(
-        init,
-        payer = seller,
-        token::mint = kwh_mint,
-        token::authority = global_state,
-        seeds = [b"escrow_vault", timeslot.key().as_ref(), seller.key().as_ref()],
-        bump
-    )]
-    pub escrow_vault: Account<'info, TokenAccount>,
-
-    /// Energy token mint
-    pub kwh_mint: Account<'info, Mint>,
-
-    /// Programs & Sysvars
+    /// Programs
     pub system_program: Program<'info, System>,
-    pub token_program: Program<'info, Token>,
-    pub rent: Sysvar<'info, Rent>,
 }
 
+///////////////////////
+// Events
+///////////////////////
 
-// more contexts will follow for PlaceBid, Settle, Redeem
+#[event]
+pub struct SupplyCommitted {
+    pub supplier: Pubkey,
+    pub timeslot: u64,
+    pub amount: u64,
+}
+
 ///////////////////////
 // State
 ///////////////////////
@@ -134,7 +139,20 @@ impl GlobalState {
         + 32;                  // fee_vault
 }
 
-/// Auction round container
+/// Minimal Supply struct for MVP (one-time immutable per timeslot)
+#[account]
+pub struct Supply {
+    pub supplier: Pubkey,     // Who committed
+    pub timeslot: u64,        // Timeslot for which supply is committed
+    pub amount: u64,          // Amount committed (lots)
+    pub bump: u8,             // PDA bump
+}
+
+impl Supply {
+    pub const LEN: usize = 32 + 8 + 8 + 1;
+}
+
+/// Auction round container (left as skeleton for now)
 #[account]
 pub struct Timeslot {
     pub epoch_ts: i64,        // identifies auction window
@@ -160,24 +178,6 @@ impl Timeslot {
         + 1 + 32;             // tail_page (Option<Pubkey>)
 }
 
-/// Seller’s commitment for a timeslot
-#[account]
-pub struct Supply {
-    pub seller: Pubkey,       // who committed
-    pub timeslot: Pubkey,     // which auction
-    pub quantity: u64,        // lots committed
-    pub reserve_price: u64,   // min price per lot
-    pub escrow_vault: Pubkey, // PDA holding locked kWh tokens
-}
-
-impl Supply {
-    pub const LEN: usize = 32 // seller
-        + 32                  // timeslot
-        + 8                   // quantity
-        + 8                   // reserve_price
-        + 32;                 // escrow_vault
-}
-
 /// A single bid entry
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct Bid {
@@ -186,6 +186,14 @@ pub struct Bid {
     pub quantity: u64,
     pub timestamp: i64,
     pub status: u8, // Active=0, Cancelled=1, Filled=2
+}
+
+impl Bid {
+    pub const LEN: usize = 32  // owner
+        + 8                    // price
+        + 8                    // quantity
+        + 8                    // timestamp
+        + 1;                   // status
 }
 
 /// Page of bids (linked list)
@@ -201,14 +209,6 @@ impl BidPage {
     pub const LEN: usize = 32                  // timeslot
         + 4 + (Bid::LEN * Self::MAX_BIDS)     // Vec<Bid>
         + 1 + 32;                             // next_page
-}
-
-impl Bid {
-    pub const LEN: usize = 32  // owner
-        + 8                    // price
-        + 8                    // quantity
-        + 8                    // timestamp
-        + 1;                   // status
 }
 
 /// Receipt created for each winning buyer after settlement
@@ -239,7 +239,6 @@ pub struct FeeVault {
 impl FeeVault {
     pub const LEN: usize = 1 + 32;
 }
-
 
 #[error_code]
 pub enum EnergyAuctionError {
