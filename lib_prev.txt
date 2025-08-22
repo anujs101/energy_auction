@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer, InitializeAccount};
 
 declare_id!("5V4D1b9wrjuJC3aAtNbayVgMYt5879w2rL2k5UoQGTvM");
 
@@ -57,72 +57,76 @@ pub mod energy_auction {
     /// Seller commits supply (one-time per (global_state, timeslot, seller))
     /// Escrows seller's energy tokens into a program-owned vault (authority = timeslot PDA)
     pub fn commit_supply(
-    ctx: Context<CommitSupply>,
-    timeslot_epoch: i64,
-    reserve_price: u64,
-    quantity: u64,
-) -> Result<()> {
-    require!(quantity > 0, EnergyAuctionError::ConstraintViolation);
-    let ts = &mut ctx.accounts.timeslot;
-    require!(matches!(ts.status(), TimeslotStatus::Open), EnergyAuctionError::InvalidTimeslot);
+        ctx: Context<CommitSupply>,
+        _timeslot_epoch: i64, // kept for seed consistency in IDL
+        reserve_price: u64,
+        quantity: u64,
+    ) -> Result<()> {
+        let supply = &mut ctx.accounts.supply;
+        require!(quantity > 0, EnergyAuctionError::ConstraintViolation);
+        require!(matches!(ctx.accounts.timeslot.status(), TimeslotStatus::Open), EnergyAuctionError::InvalidTimeslot);
 
-    let supply = &mut ctx.accounts.supply;
-    supply.supplier      = ctx.accounts.signer.key();
-    supply.timeslot      = ts.key();
-    supply.amount        = quantity;
-    supply.reserve_price = reserve_price;
-    supply.bump          = ctx.bumps.supply;
-    supply.energy_mint   = ctx.accounts.energy_mint.key();
-    supply.escrow_vault  = ctx.accounts.seller_escrow.key();
+        // initialize supply account fields (immutable after init)
+        supply.supplier = ctx.accounts.signer.key();
+        supply.timeslot = ctx.accounts.timeslot.key();
+        supply.amount = quantity;
+        supply.reserve_price = reserve_price;
+        supply.bump = ctx.bumps.supply;
+        supply.energy_mint = ctx.accounts.energy_mint.key();
+        supply.escrow_vault = ctx.accounts.seller_escrow.key();
 
-    // move energy tokens: seller_source -> seller_escrow (authority = signer)
-    let cpi_ctx = CpiContext::new(
-        ctx.accounts.token_program.to_account_info(),
-        Transfer {
-            from: ctx.accounts.seller_source.to_account_info(),
-            to: ctx.accounts.seller_escrow.to_account_info(),
-            authority: ctx.accounts.signer.to_account_info(),
-        },
-    );
-    token::transfer(cpi_ctx, quantity)?;
+        // transfer energy tokens from seller to escrow (authority = signer)
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.seller_source.to_account_info(),
+                to: ctx.accounts.seller_escrow.to_account_info(),
+                authority: ctx.accounts.signer.to_account_info(),
+            },
+        );
+        token::transfer(cpi_ctx, quantity)?;
 
-    ts.total_supply = ts.total_supply.checked_add(quantity).ok_or(EnergyAuctionError::MathError)?;
+        // bump total supply on timeslot
+        let ts = &mut ctx.accounts.timeslot;
+        ts.total_supply = ts
+            .total_supply
+            .checked_add(quantity)
+            .ok_or(EnergyAuctionError::MathError)?;
 
-    emit!(SupplyCommitted {
-        supplier: supply.supplier,
-        timeslot: timeslot_epoch as u64,
-        amount: quantity,
-    });
+        emit!(SupplyCommitted {
+            supplier: supply.supplier,
+            timeslot: ts.epoch_ts as u64,
+            amount: quantity,
+        });
 
-    Ok(())
-}
-
+        Ok(())
+    }
 
     /// Buyer places bid, escrows quote tokens (USDC) into a program-owned vault (authority = timeslot PDA)
     /// Buyer places bid, escrows quote tokens (USDC) into a program-owned vault (authority = timeslot PDA)
 pub fn place_bid(
     ctx: Context<PlaceBid>,
-    page_index: u32,
     price: u64,
     quantity: u64,
     timestamp: i64,
 ) -> Result<()> {
     let ts = &mut ctx.accounts.timeslot;
 
+    // ✅ validation checks
     require!(matches!(ts.status(), TimeslotStatus::Open), EnergyAuctionError::InvalidTimeslot);
     require!(price > 0 && quantity > 0, EnergyAuctionError::ConstraintViolation);
     require!(price % ts.price_tick == 0, EnergyAuctionError::ConstraintViolation);
 
-    // escrow amount = price * quantity
-    let amount = (price as u128)
+    // ✅ compute escrow transfer amount = price * quantity
+    let amount_u128 = (price as u128)
         .checked_mul(quantity as u128)
         .ok_or(EnergyAuctionError::MathError)?;
-    let amount = u64::try_from(amount).map_err(|_| EnergyAuctionError::MathError)?;
+    let amount = u64::try_from(amount_u128).map_err(|_| EnergyAuctionError::MathError)?;
 
-    // transfer quote to escrow
+    // ✅ transfer USDC into escrow vault
     let cpi_ctx = CpiContext::new(
         ctx.accounts.token_program.to_account_info(),
-        anchor_spl::token::Transfer {
+        Transfer {
             from: ctx.accounts.buyer_source.to_account_info(),
             to: ctx.accounts.timeslot_quote_escrow.to_account_info(),
             authority: ctx.accounts.buyer.to_account_info(),
@@ -130,18 +134,16 @@ pub fn place_bid(
     );
     token::transfer(cpi_ctx, amount)?;
 
-    // append to page
-    let page = &mut ctx.accounts.bid_page;
-    if page.bids.is_empty() && page.timeslot == Pubkey::default() {
-        // first init of this page
-        page.timeslot = ts.key();
-        page.next_page = None;
-    } else {
-        // page must belong to this timeslot
-        require_keys_eq!(page.timeslot, ts.key(), EnergyAuctionError::ConstraintViolation);
-    }
+    // ✅ select target page: use tail_page if not full, else new_page
+    let page = ctx
+        .accounts
+        .tail_page
+        .as_deref_mut()
+        .filter(|p| p.bids.len() < BidPage::MAX_BIDS)
+        .or_else(|| ctx.accounts.new_page.as_deref_mut())
+        .ok_or(EnergyAuctionError::ConstraintViolation)?;
 
-    require!(page.bids.len() < BidPage::MAX_BIDS, EnergyAuctionError::ConstraintViolation);
+    // ✅ push new bid into chosen page
     page.bids.push(Bid {
         owner: ctx.accounts.buyer.key(),
         price,
@@ -150,10 +152,14 @@ pub fn place_bid(
         status: BidStatus::Active as u8,
     });
 
-    ts.total_bids = ts.total_bids.checked_add(quantity).ok_or(EnergyAuctionError::MathError)?;
+    // ✅ update timeslot bid count
+    ts.total_bids = ts
+        .total_bids
+        .checked_add(quantity)
+        .ok_or(EnergyAuctionError::MathError)?;
+
     Ok(())
 }
-
 
 
 
@@ -235,17 +241,19 @@ pub struct OpenTimeslot<'info> {
 
 /// Seller commits supply for a specific timeslot (one-time)
 #[derive(Accounts)]
-#[instruction(timeslot_epoch: i64)]
+#[instruction(_timeslot_epoch: i64)]
 pub struct CommitSupply<'info> {
+    /// Global protocol state
     pub global_state: Account<'info, GlobalState>,
 
-    #[account(
-        mut,
-        seeds = [b"timeslot", &timeslot_epoch.to_le_bytes()],
-        bump
+    /// Timeslot must be Open
+    #[account(mut,
+        seeds = [b"timeslot", &timeslot.epoch_ts.to_le_bytes()],
+        bump,
     )]
     pub timeslot: Account<'info, Timeslot>,
 
+    /// PDA: ("supply", timeslot, signer)
     #[account(
         init,
         payer = signer,
@@ -255,15 +263,14 @@ pub struct CommitSupply<'info> {
     )]
     pub supply: Account<'info, Supply>,
 
+    /// Energy mint (kWh token)
     pub energy_mint: Account<'info, Mint>,
 
-    #[account(
-        mut,
-        constraint = seller_source.mint == energy_mint.key() @ EnergyAuctionError::ConstraintViolation,
-        constraint = seller_source.owner == signer.key() @ EnergyAuctionError::Unauthorized
-    )]
+    /// Seller's source ATA for energy tokens
+    #[account(mut)]
     pub seller_source: Account<'info, TokenAccount>,
 
+    /// Program-owned escrow TA for seller's energy (authority = timeslot PDA)
     #[account(
         init,
         payer = signer,
@@ -274,59 +281,52 @@ pub struct CommitSupply<'info> {
     )]
     pub seller_escrow: Account<'info, TokenAccount>,
 
+    /// Seller committing energy (payer & signer)
     #[account(mut)]
     pub signer: Signer<'info>,
 
+    /// Programs
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
 }
 
 /// Buyer places a bid into an active bid page
 #[derive(Accounts)]
-#[instruction(page_index: u32)]
 pub struct PlaceBid<'info> {
-    #[account(mut)]
+    #[account(mut, has_one = quote_mint)]
     pub global_state: Account<'info, GlobalState>,
 
     #[account(mut)]
     pub timeslot: Account<'info, Timeslot>,
 
-    #[account(
-        init_if_needed,
-        payer = buyer,
-        token::mint = quote_mint,
-        token::authority = timeslot,
-        seeds = [b"quote_escrow", timeslot.key().as_ref()],
-        bump
-    )]
+    #[account(mut)]
     pub timeslot_quote_escrow: Account<'info, TokenAccount>,
 
     pub quote_mint: Account<'info, Mint>,
 
-    #[account(
-        mut,
-        constraint = buyer_source.mint == quote_mint.key() @ EnergyAuctionError::ConstraintViolation,
-        constraint = buyer_source.owner == buyer.key() @ EnergyAuctionError::Unauthorized
-    )]
+    #[account(mut)]
     pub buyer_source: Account<'info, TokenAccount>,
 
     #[account(mut)]
     pub buyer: Signer<'info>,
 
+    /// The last page of bids for this timeslot (if exists)
+    #[account(mut)]
+    pub tail_page: Option<Account<'info, BidPage>>,
+
+    /// A newly created page if the old one is full
     #[account(
         init_if_needed,
         payer = buyer,
-        space = 8 + BidPage::LEN,
-        seeds = [b"bid_page", timeslot.key().as_ref(), &page_index.to_le_bytes()],
+        space = BidPage::LEN,
+        seeds = [b"bid_page", timeslot.key().as_ref(), &(timeslot.total_bids / 200).to_le_bytes()],
         bump
     )]
-    pub bid_page: Account<'info, BidPage>,
+    pub new_page: Option<Account<'info, BidPage>>,
 
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
 }
-
-
 
 
 #[derive(Accounts)]
@@ -461,7 +461,7 @@ pub struct BidPage {
 }
 
 impl BidPage {
-    pub const MAX_BIDS: usize = 150;
+    pub const MAX_BIDS: usize = 200;
     pub const LEN: usize = 32                  // timeslot
         + 4 + (Bid::LEN * Self::MAX_BIDS)     // Vec<Bid>
         + 1 + 32;                             // next_page
