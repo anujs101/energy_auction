@@ -51,111 +51,110 @@ pub mod energy_auction {
         slot.total_bids = 0;
         slot.head_page = None;
         slot.tail_page = None;
+        slot.clearing_price = 0;
+        slot.total_sold_quantity = 0; // Initialize new field
         Ok(())
     }
 
     /// Seller commits supply (one-time per (global_state, timeslot, seller))
     /// Escrows seller's energy tokens into a program-owned vault (authority = timeslot PDA)
     pub fn commit_supply(
-    ctx: Context<CommitSupply>,
-    timeslot_epoch: i64,
-    reserve_price: u64,
-    quantity: u64,
-) -> Result<()> {
-    require!(quantity > 0, EnergyAuctionError::ConstraintViolation);
-    let ts = &mut ctx.accounts.timeslot;
-    require!(matches!(ts.status(), TimeslotStatus::Open), EnergyAuctionError::InvalidTimeslot);
+        ctx: Context<CommitSupply>,
+        timeslot_epoch: i64,
+        reserve_price: u64,
+        quantity: u64,
+    ) -> Result<()> {
+        require!(quantity > 0, EnergyAuctionError::ConstraintViolation);
+        let ts = &mut ctx.accounts.timeslot;
+        require!(matches!(ts.status(), TimeslotStatus::Open), EnergyAuctionError::InvalidTimeslot);
 
-    let supply = &mut ctx.accounts.supply;
-    supply.supplier      = ctx.accounts.signer.key();
-    supply.timeslot      = ts.key();
-    supply.amount        = quantity;
-    supply.reserve_price = reserve_price;
-    supply.bump          = ctx.bumps.supply;
-    supply.energy_mint   = ctx.accounts.energy_mint.key();
-    supply.escrow_vault  = ctx.accounts.seller_escrow.key();
+        let supply = &mut ctx.accounts.supply;
+        supply.supplier      = ctx.accounts.signer.key();
+        supply.timeslot      = ts.key();
+        supply.amount        = quantity;
+        supply.reserve_price = reserve_price;
+        supply.bump          = ctx.bumps.supply;
+        supply.energy_mint   = ctx.accounts.energy_mint.key();
+        supply.escrow_vault  = ctx.accounts.seller_escrow.key();
+        supply.claimed       = false;
 
-    // move energy tokens: seller_source -> seller_escrow (authority = signer)
-    let cpi_ctx = CpiContext::new(
-        ctx.accounts.token_program.to_account_info(),
-        Transfer {
-            from: ctx.accounts.seller_source.to_account_info(),
-            to: ctx.accounts.seller_escrow.to_account_info(),
-            authority: ctx.accounts.signer.to_account_info(),
-        },
-    );
-    token::transfer(cpi_ctx, quantity)?;
+        // move energy tokens: seller_source -> seller_escrow (authority = signer)
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.seller_source.to_account_info(),
+                to: ctx.accounts.seller_escrow.to_account_info(),
+                authority: ctx.accounts.signer.to_account_info(),
+            },
+        );
+        token::transfer(cpi_ctx, quantity)?;
 
-    ts.total_supply = ts.total_supply.checked_add(quantity).ok_or(EnergyAuctionError::MathError)?;
+        ts.total_supply = ts.total_supply.checked_add(quantity).ok_or(EnergyAuctionError::MathError)?;
 
-    emit!(SupplyCommitted {
-        supplier: supply.supplier,
-        timeslot: timeslot_epoch as u64,
-        amount: quantity,
-    });
+        emit!(SupplyCommitted {
+            supplier: supply.supplier,
+            timeslot: timeslot_epoch as u64,
+            amount: quantity,
+        });
 
-    Ok(())
-}
-
-
-    /// Buyer places bid, escrows quote tokens (USDC) into a program-owned vault (authority = timeslot PDA)
-    /// Buyer places bid, escrows quote tokens (USDC) into a program-owned vault (authority = timeslot PDA)
-pub fn place_bid(
-    ctx: Context<PlaceBid>,
-    page_index: u32,
-    price: u64,
-    quantity: u64,
-    timestamp: i64,
-) -> Result<()> {
-    let ts = &mut ctx.accounts.timeslot;
-
-    require!(matches!(ts.status(), TimeslotStatus::Open), EnergyAuctionError::InvalidTimeslot);
-    require!(price > 0 && quantity > 0, EnergyAuctionError::ConstraintViolation);
-    require!(price % ts.price_tick == 0, EnergyAuctionError::ConstraintViolation);
-
-    // escrow amount = price * quantity
-    let amount = (price as u128)
-        .checked_mul(quantity as u128)
-        .ok_or(EnergyAuctionError::MathError)?;
-    let amount = u64::try_from(amount).map_err(|_| EnergyAuctionError::MathError)?;
-
-    // transfer quote to escrow
-    let cpi_ctx = CpiContext::new(
-        ctx.accounts.token_program.to_account_info(),
-        anchor_spl::token::Transfer {
-            from: ctx.accounts.buyer_source.to_account_info(),
-            to: ctx.accounts.timeslot_quote_escrow.to_account_info(),
-            authority: ctx.accounts.buyer.to_account_info(),
-        },
-    );
-    token::transfer(cpi_ctx, amount)?;
-
-    // append to page
-    let page = &mut ctx.accounts.bid_page;
-    if page.bids.is_empty() && page.timeslot == Pubkey::default() {
-        // first init of this page
-        page.timeslot = ts.key();
-        page.next_page = None;
-    } else {
-        // page must belong to this timeslot
-        require_keys_eq!(page.timeslot, ts.key(), EnergyAuctionError::ConstraintViolation);
+        Ok(())
     }
 
-    require!(page.bids.len() < BidPage::MAX_BIDS, EnergyAuctionError::ConstraintViolation);
-    page.bids.push(Bid {
-        owner: ctx.accounts.buyer.key(),
-        price,
-        quantity,
-        timestamp,
-        status: BidStatus::Active as u8,
-    });
 
-    ts.total_bids = ts.total_bids.checked_add(quantity).ok_or(EnergyAuctionError::MathError)?;
-    Ok(())
-}
+    /// Buyer places bid, escrows quote tokens (USDC) into a program-owned vault (authority = timeslot PDA)
+    pub fn place_bid(
+        ctx: Context<PlaceBid>,
+        page_index: u32,
+        price: u64,
+        quantity: u64,
+        timestamp: i64,
+    ) -> Result<()> {
+        let ts = &mut ctx.accounts.timeslot;
 
+        require!(matches!(ts.status(), TimeslotStatus::Open), EnergyAuctionError::InvalidTimeslot);
+        require!(price > 0 && quantity > 0, EnergyAuctionError::ConstraintViolation);
+        require!(price % ts.price_tick == 0, EnergyAuctionError::ConstraintViolation);
 
+        // escrow amount = price * quantity
+        let amount = (price as u128)
+            .checked_mul(quantity as u128)
+            .ok_or(EnergyAuctionError::MathError)?;
+        let amount = u64::try_from(amount).map_err(|_| EnergyAuctionError::MathError)?;
 
+        // transfer quote to escrow
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            anchor_spl::token::Transfer {
+                from: ctx.accounts.buyer_source.to_account_info(),
+                to: ctx.accounts.timeslot_quote_escrow.to_account_info(),
+                authority: ctx.accounts.buyer.to_account_info(),
+            },
+        );
+        token::transfer(cpi_ctx, amount)?;
+
+        // append to page
+        let page = &mut ctx.accounts.bid_page;
+        if page.bids.is_empty() && page.timeslot == Pubkey::default() {
+            // first init of this page
+            page.timeslot = ts.key();
+            page.next_page = None;
+        } else {
+            // page must belong to this timeslot
+            require_keys_eq!(page.timeslot, ts.key(), EnergyAuctionError::ConstraintViolation);
+        }
+
+        require!(page.bids.len() < BidPage::MAX_BIDS, EnergyAuctionError::ConstraintViolation);
+        page.bids.push(Bid {
+            owner: ctx.accounts.buyer.key(),
+            price,
+            quantity,
+            timestamp,
+            status: BidStatus::Active as u8,
+        });
+
+        ts.total_bids = ts.total_bids.checked_add(quantity).ok_or(EnergyAuctionError::MathError)?;
+        Ok(())
+    }
 
     /// Seal a timeslot (freeze order flow)
     pub fn seal_timeslot(ctx: Context<SealTimeslot>) -> Result<()> {
@@ -170,11 +169,165 @@ pub fn place_bid(
         Ok(())
     }
 
-    // TODO:
-    // - clear_and_settle
-    // - withdraw_proceeds
-    // - withdraw_refund
-    // - redeem_energy
+    // --- SETTLEMENT FLOW ---
+
+    /// 1. Settle Timeslot: Authority sets the final clearing price and sold quantity.
+    /// This instruction only records the outcome; it does not move funds.
+    pub fn settle_timeslot(
+        ctx: Context<SettleTimeslot>,
+        clearing_price: u64,
+        total_sold_quantity: u64,
+    ) -> Result<()> {
+        require_keys_eq!(
+            ctx.accounts.global_state.authority,
+            ctx.accounts.authority.key(),
+            EnergyAuctionError::InvalidAuthority
+        );
+        let ts = &mut ctx.accounts.timeslot;
+        require!(matches!(ts.status(), TimeslotStatus::Sealed), EnergyAuctionError::InvalidTimeslot);
+        require!(clearing_price > 0, EnergyAuctionError::ConstraintViolation);
+        require!(total_sold_quantity <= ts.total_supply, EnergyAuctionError::MathError);
+
+        // Update timeslot state with the auction outcome
+        ts.clearing_price = clearing_price;
+        ts.total_sold_quantity = total_sold_quantity;
+        ts.status = TimeslotStatus::Settled as u8;
+
+        Ok(())
+    }
+
+    /// 2. Create Fill Receipt: Authority creates a receipt for each winning buyer.
+    pub fn create_fill_receipt(
+        ctx: Context<CreateFillReceipt>,
+        quantity: u64,
+    ) -> Result<()> {
+        require_keys_eq!(
+            ctx.accounts.global_state.authority,
+            ctx.accounts.authority.key(),
+            EnergyAuctionError::InvalidAuthority
+        );
+        let ts = &ctx.accounts.timeslot;
+        require!(matches!(ts.status(), TimeslotStatus::Settled), EnergyAuctionError::InvalidTimeslot);
+
+        let receipt = &mut ctx.accounts.fill_receipt;
+        receipt.buyer = ctx.accounts.buyer.key();
+        receipt.timeslot = ts.key();
+        receipt.quantity = quantity;
+        receipt.clearing_price = ts.clearing_price;
+        receipt.redeemed = false;
+
+        Ok(())
+    }
+
+    /// 3. Withdraw Proceeds: Seller claims their earnings.
+    /// This instruction calculates the fee, sends it to the vault, and sends the net proceeds to the seller.
+    pub fn withdraw_proceeds(ctx: Context<WithdrawProceeds>) -> Result<()> {
+        let ts = &ctx.accounts.timeslot;
+        let supply = &mut ctx.accounts.supply;
+        let global_state = &ctx.accounts.global_state;
+        require!(matches!(ts.status(), TimeslotStatus::Settled), EnergyAuctionError::InvalidTimeslot);
+        require!(!supply.claimed, EnergyAuctionError::AlreadyClaimed);
+
+        // Calculate gross proceeds based on the actual sold quantity.
+        // NOTE: This assumes a single seller for the MVP.
+        let gross_proceeds = (ts.total_sold_quantity as u128)
+            .checked_mul(ts.clearing_price as u128)
+            .ok_or(EnergyAuctionError::MathError)?;
+
+        // Calculate protocol fee from the gross proceeds
+        let protocol_fee = gross_proceeds
+            .checked_mul(global_state.fee_bps as u128)
+            .ok_or(EnergyAuctionError::MathError)?
+            .checked_div(10000)
+            .ok_or(EnergyAuctionError::MathError)?;
+        
+        let net_proceeds = gross_proceeds
+            .checked_sub(protocol_fee)
+            .ok_or(EnergyAuctionError::MathError)?;
+
+        // PDA signer seeds
+        let seeds = &[&b"timeslot"[..], &ts.epoch_ts.to_le_bytes(), &[ctx.bumps.timeslot]];
+        let signer_seeds = &[&seeds[..]];
+
+        // Transfer fee to the fee vault
+        let cpi_ctx_fee = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.timeslot_quote_escrow.to_account_info(),
+                to: ctx.accounts.fee_vault.to_account_info(),
+                authority: ts.to_account_info(),
+            },
+            signer_seeds,
+        );
+        token::transfer(cpi_ctx_fee, protocol_fee as u64)?;
+        
+        // Transfer net proceeds to the seller
+        let cpi_ctx_proceeds = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.timeslot_quote_escrow.to_account_info(),
+                to: ctx.accounts.seller_proceeds_ata.to_account_info(),
+                authority: ts.to_account_info(),
+            },
+            signer_seeds,
+        );
+        token::transfer(cpi_ctx_proceeds, net_proceeds as u64)?;
+
+        supply.claimed = true;
+        Ok(())
+    }
+
+    /// 4. Redeem Energy & Refund: Buyer claims their won energy and gets a refund for over-bids.
+    pub fn redeem_energy_and_refund(
+        ctx: Context<RedeemEnergyAndRefund>,
+        total_bid_amount_escrowed: u64,
+    ) -> Result<()> {
+        let ts = &ctx.accounts.timeslot;
+        let receipt = &mut ctx.accounts.fill_receipt;
+        require!(matches!(ts.status(), TimeslotStatus::Settled), EnergyAuctionError::InvalidTimeslot);
+        require!(!receipt.redeemed, EnergyAuctionError::AlreadyClaimed);
+        require_keys_eq!(receipt.buyer, ctx.accounts.buyer.key(), EnergyAuctionError::Unauthorized);
+
+        // A. Calculate refund
+        let cost = (receipt.quantity as u128)
+            .checked_mul(receipt.clearing_price as u128)
+            .ok_or(EnergyAuctionError::MathError)?;
+        let refund_amount = (total_bid_amount_escrowed as u128)
+            .checked_sub(cost)
+            .ok_or(EnergyAuctionError::MathError)?;
+
+        let timeslot_seeds = &[&b"timeslot"[..], &ts.epoch_ts.to_le_bytes(), &[ctx.bumps.timeslot]];
+        let signer_seeds = &[&timeslot_seeds[..]];
+        
+        // B. Transfer refund to buyer
+        if refund_amount > 0 {
+            let cpi_ctx = CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.timeslot_quote_escrow.to_account_info(),
+                    to: ctx.accounts.buyer_quote_ata.to_account_info(),
+                    authority: ts.to_account_info(),
+                },
+                signer_seeds,
+            );
+            token::transfer(cpi_ctx, refund_amount as u64)?;
+        }
+
+        // C. Transfer energy from seller escrows to buyer
+        let cpi_ctx_energy = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.seller_escrow.to_account_info(),
+                to: ctx.accounts.buyer_energy_ata.to_account_info(),
+                authority: ts.to_account_info(),
+            },
+            signer_seeds,
+        );
+        token::transfer(cpi_ctx_energy, receipt.quantity)?;
+
+        receipt.redeemed = true;
+        Ok(())
+    }
 }
 
 ///////////////////////
@@ -326,9 +479,6 @@ pub struct PlaceBid<'info> {
     pub token_program: Program<'info, Token>,
 }
 
-
-
-
 #[derive(Accounts)]
 pub struct SealTimeslot<'info> {
     pub global_state: Account<'info, GlobalState>,
@@ -336,6 +486,109 @@ pub struct SealTimeslot<'info> {
     pub timeslot: Account<'info, Timeslot>,
     pub authority: Signer<'info>,
 }
+
+// --- SETTLEMENT CONTEXTS ---
+
+#[derive(Accounts)]
+pub struct SettleTimeslot<'info> {
+    pub global_state: Account<'info, GlobalState>,
+    #[account(
+        mut,
+        seeds = [b"timeslot", &timeslot.epoch_ts.to_le_bytes()],
+        bump,
+    )]
+    pub timeslot: Account<'info, Timeslot>,
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct CreateFillReceipt<'info> {
+    pub global_state: Account<'info, GlobalState>,
+    #[account(
+        seeds = [b"timeslot", &timeslot.epoch_ts.to_le_bytes()],
+        bump,
+    )]
+    pub timeslot: Account<'info, Timeslot>,
+    /// CHECK: This is the buyer for whom we are creating the receipt.
+    pub buyer: AccountInfo<'info>,
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + FillReceipt::LEN,
+        seeds = [b"fill_receipt", timeslot.key().as_ref(), buyer.key().as_ref()],
+        bump
+    )]
+    pub fill_receipt: Account<'info, FillReceipt>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct WithdrawProceeds<'info> {
+    pub global_state: Account<'info, GlobalState>,
+    #[account(
+        seeds = [b"timeslot", &timeslot.epoch_ts.to_le_bytes()],
+        bump,
+    )]
+    pub timeslot: Account<'info, Timeslot>,
+    #[account(
+        mut,
+        seeds = [b"supply", timeslot.key().as_ref(), seller.key().as_ref()],
+        bump
+    )]
+    pub supply: Account<'info, Supply>,
+    #[account(
+        mut,
+        seeds = [b"quote_escrow", timeslot.key().as_ref()],
+        bump
+    )]
+    pub timeslot_quote_escrow: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        seeds = [b"fee_vault"],
+        bump
+    )]
+    pub fee_vault: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub seller_proceeds_ata: Account<'info, TokenAccount>,
+    #[account(mut, address = supply.supplier)]
+    pub seller: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct RedeemEnergyAndRefund<'info> {
+    #[account(
+        seeds = [b"timeslot", &timeslot.epoch_ts.to_le_bytes()],
+        bump,
+    )]
+    pub timeslot: Account<'info, Timeslot>,
+    #[account(
+        mut,
+        seeds = [b"fill_receipt", timeslot.key().as_ref(), buyer.key().as_ref()],
+        bump,
+        has_one = buyer @ EnergyAuctionError::Unauthorized
+    )]
+    pub fill_receipt: Account<'info, FillReceipt>,
+    #[account(
+        mut,
+        seeds = [b"quote_escrow", timeslot.key().as_ref()],
+        bump
+    )]
+    pub timeslot_quote_escrow: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub buyer_quote_ata: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub buyer_energy_ata: Account<'info, TokenAccount>,
+    /// CHECK: This is a seller's energy escrow. A real implementation would iterate over many.
+    #[account(mut)]
+    pub seller_escrow: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub buyer: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+}
+
 
 ///////////////////////
 // Events
@@ -380,10 +633,11 @@ pub struct Supply {
     pub bump: u8,             // PDA bump
     pub energy_mint: Pubkey,  // energy token mint
     pub escrow_vault: Pubkey, // escrow token account for energy
+    pub claimed: bool,        // Has the seller withdrawn proceeds?
 }
 
 impl Supply {
-    pub const LEN: usize = 32 + 32 + 8 + 8 + 1 + 32 + 32;
+    pub const LEN: usize = 32 + 32 + 8 + 8 + 1 + 32 + 32 + 1;
 }
 
 /// Auction round container
@@ -398,6 +652,8 @@ pub struct Timeslot {
     pub total_bids: u64,      // total lots bid
     pub head_page: Option<Pubkey>, // linked list of BidPages
     pub tail_page: Option<Pubkey>, // last BidPage
+    pub clearing_price: u64,  // Final price determined after sealing
+    pub total_sold_quantity: u64, // Final quantity sold in the auction
 }
 
 impl Timeslot {
@@ -409,7 +665,9 @@ impl Timeslot {
         + 8                   // total_supply
         + 8                   // total_bids
         + 1 + 32              // head_page (Option<Pubkey>)
-        + 1 + 32;             // tail_page (Option<Pubkey>)
+        + 1 + 32              // tail_page (Option<Pubkey>)
+        + 8                   // clearing_price
+        + 8;                  // total_sold_quantity
 
     pub fn status(&self) -> TimeslotStatus {
         match self.status {
@@ -456,7 +714,7 @@ impl Bid {
 #[account]
 pub struct BidPage {
     pub timeslot: Pubkey,         // which timeslot
-    pub bids: Vec<Bid>,           // fixed max length (MVP: 200)
+    pub bids: Vec<Bid>,           // fixed max length (MVP: 150)
     pub next_page: Option<Pubkey>,
 }
 
@@ -498,39 +756,24 @@ impl FeeVault {
 
 #[error_code]
 pub enum EnergyAuctionError {
-    /// The provided authority does not match the global state authority
     #[msg("Invalid authority for this operation")]
     InvalidAuthority,
-
-    /// Supply already exists for this seller and timeslot
     #[msg("Supply already committed for this seller and timeslot")]
     DuplicateSupply,
-
-    /// Timeslot is not active or invalid
-    #[msg("Timeslot is not active or has expired")]
+    #[msg("Timeslot is not in the correct state for this operation")]
     InvalidTimeslot,
-
-    /// Seller does not have enough tokens to commit supply
     #[msg("Insufficient token balance to commit supply")]
     InsufficientBalance,
-
-    /// Overflow or underflow during arithmetic
     #[msg("Math overflow/underflow error")]
     MathError,
-
-    /// Provided escrow vault PDA does not match expected PDA
     #[msg("Invalid escrow vault account")]
     InvalidEscrowVault,
-
-    /// Unauthorized signer tried to call this instruction
     #[msg("Unauthorized signer for this transaction")]
     Unauthorized,
-
-    /// Global state account mismatch
     #[msg("Invalid global state account provided")]
     InvalidGlobalState,
-
-    /// General constraint violation
     #[msg("Account constraint violated")]
     ConstraintViolation,
+    #[msg("Proceeds or refund have already been claimed")]
+    AlreadyClaimed,
 }

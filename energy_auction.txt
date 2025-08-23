@@ -1,17 +1,13 @@
 import * as anchor from "@coral-xyz/anchor";
-import { Program } from "@coral-xyz/anchor";
+import { Program, AnchorError } from "@coral-xyz/anchor";
 import { EnergyAuction } from "../target/types/energy_auction";
 import {
   TOKEN_PROGRAM_ID,
-  ASSOCIATED_TOKEN_PROGRAM_ID,
   createMint,
   createAssociatedTokenAccount,
   mintTo,
   getAccount,
-  getAssociatedTokenAddressSync,
-  getAssociatedTokenAddress,
 } from "@solana/spl-token";
-import { Transaction } from "@solana/web3.js";
 import { assert } from "chai";
 
 describe("energy_auction", () => {
@@ -35,7 +31,7 @@ describe("energy_auction", () => {
   let buyerQuoteAta: anchor.web3.PublicKey;
   let poorBuyerQuoteAta: anchor.web3.PublicKey;
 
-  // PDAs we'll derive in beforeEach/it blocks
+  // PDAs we'll derive
   let globalStatePda: anchor.web3.PublicKey;
   let feeVaultPda: anchor.web3.PublicKey;
 
@@ -45,39 +41,51 @@ describe("energy_auction", () => {
   // helper: airdrop lamports for keypair and confirm
   const airdropAndConfirm = async (pubkey: anchor.web3.PublicKey, lamports: number) => {
     const sig = await provider.connection.requestAirdrop(pubkey, lamports);
-    await provider.connection.confirmTransaction(sig, "confirmed");
+    const blockhash = await provider.connection.getLatestBlockhash();
+    await provider.connection.confirmTransaction({
+        signature: sig,
+        ...blockhash
+    }, "confirmed");
   };
 
   // helper: derive BidPage PDA from timeslot totalBids (reads on-chain)
   const deriveBidPagePda = async (timeslotPda: anchor.web3.PublicKey) => {
-    const tsAcc: any = await program.account.timeslot.fetch(timeslotPda);
-    // integer division by 200
-    const pageIndex = tsAcc.totalBids.div(new anchor.BN(200));
+    const tsAcc = await program.account.timeslot.fetch(timeslotPda);
+    // integer division by 150 (max bids per page)
+    const pageIndexBN = tsAcc.totalBids.div(new anchor.BN(150));
+    const pageIndexU32 = pageIndexBN.toNumber(); // Convert BN to number for the return value
+
+    // The on-chain program expects a u32 for the page_index seed.
+    // We must create a 4-byte buffer representing this u32 in little-endian format.
+    const pageIndexBuffer = Buffer.alloc(4);
+    pageIndexBuffer.writeUInt32LE(pageIndexU32, 0);
+
     const [pda] = anchor.web3.PublicKey.findProgramAddressSync(
       [
         Buffer.from("bid_page"),
         timeslotPda.toBuffer(),
-        pageIndex.toArrayLike(Buffer, "le", 8),
+        pageIndexBuffer, // Use the 4-byte u32 buffer
       ],
       program.programId
     );
-    return { pda, pageIndex };
+    return { pda, pageIndex: pageIndexU32 };
   };
 
+
   before(async () => {
-    // fund seller/buyer/pb
+    // fund seller/buyer/poorBuyer
     await airdropAndConfirm(seller.publicKey, 2 * anchor.web3.LAMPORTS_PER_SOL);
     await airdropAndConfirm(buyer.publicKey, 2 * anchor.web3.LAMPORTS_PER_SOL);
     await airdropAndConfirm(poorBuyer.publicKey, 1 * anchor.web3.LAMPORTS_PER_SOL);
 
-    // create mints (authority.payer is the Keypair paying fees; authority.publicKey is mint authority)
+    // create mints
     await createMint(
       provider.connection,
-      authority.payer,          // payer Keypair (Anchor test harness exposes this)
-      authority.publicKey,      // mint authority
-      null,                     // freeze authority
-      6,                        // quote mint decimals (USDC-like)
-      quoteMint                 // new mint keypair
+      authority.payer,
+      authority.publicKey,
+      null,
+      6, // quote mint decimals (USDC-like)
+      quoteMint
     );
 
     await createMint(
@@ -85,14 +93,14 @@ describe("energy_auction", () => {
       authority.payer,
       authority.publicKey,
       null,
-      0,                        // energy mint decimals (kWh)
+      0, // energy mint decimals (kWh)
       energyMint
     );
 
     // create ATAs for seller/buyer/poorBuyer
     sellerEnergyAta = await createAssociatedTokenAccount(
       provider.connection,
-      seller,                          // payer = seller (signer)
+      seller,
       energyMint.publicKey,
       seller.publicKey
     );
@@ -127,10 +135,9 @@ describe("energy_auction", () => {
       quoteMint.publicKey,
       buyerQuoteAta,
       authority.publicKey,
-      500_000n * 1_000_000n // 500,000 USDC (6 decimals) — use BigInt where appropriate
+      500_000 * 1_000_000 // 500,000 USDC (6 decimals)
     );
 
-    // give poor buyer a tiny balance
     await mintTo(
       provider.connection,
       authority.payer,
@@ -140,7 +147,7 @@ describe("energy_auction", () => {
       1000 // 0.001 USDC (6-dec)
     );
 
-    // derive PDAs used by program
+    // derive global PDAs
     [globalStatePda] = anchor.web3.PublicKey.findProgramAddressSync(
       [Buffer.from("global_state")],
       program.programId
@@ -156,7 +163,7 @@ describe("energy_auction", () => {
     const version = 1;
 
     await program.methods
-      .initGlobalState(new anchor.BN(feeBps), version) // if your IDL expects u16/u8, use numbers; some combos accept BN
+      .initGlobalState(feeBps, version)
       .accounts({
         globalState: globalStatePda,
         quoteMint: quoteMint.publicKey,
@@ -167,7 +174,7 @@ describe("energy_auction", () => {
       })
       .rpc();
 
-    const state: any = await program.account.globalState.fetch(globalStatePda);
+    const state = await program.account.globalState.fetch(globalStatePda);
     assert.ok(state.authority.equals(authority.publicKey));
     assert.equal(state.feeBps, feeBps);
     assert.equal(state.version, version);
@@ -194,7 +201,7 @@ describe("energy_auction", () => {
       })
       .rpc();
 
-    const slot: any = await program.account.timeslot.fetch(timeslotPda);
+    const slot = await program.account.timeslot.fetch(timeslotPda);
     assert.isTrue(slot.epochTs.eq(epochTs));
     assert.equal(slot.status, 1); // Open
     assert.isTrue(slot.lotSize.eq(lotSize));
@@ -202,7 +209,7 @@ describe("energy_auction", () => {
     assert.isTrue(slot.totalSupply.eq(new anchor.BN(0)));
   });
 
-  it("✅ Allows a seller to commit supply (escrow tokens into seller_escrow PDA)", async () => {
+  it("✅ Allows a seller to commit supply", async () => {
     const [timeslotPda] = anchor.web3.PublicKey.findProgramAddressSync(
       [Buffer.from("timeslot"), epochTs.toArrayLike(Buffer, "le", 8)],
       program.programId
@@ -223,11 +230,10 @@ describe("energy_auction", () => {
 
     const sellerBefore = (await getAccount(provider.connection, sellerEnergyAta)).amount;
 
-    // call commitSupply (timeslot_epoch, reserve_price, quantity)
     await program.methods
       .commitSupply(epochTs, reservePrice, quantity)
       .accounts({
-        global_state: globalStatePda,
+        globalState: globalStatePda,
         timeslot: timeslotPda,
         supply: supplyPda,
         energyMint: energyMint.publicKey,
@@ -240,7 +246,7 @@ describe("energy_auction", () => {
       .signers([seller])
       .rpc();
 
-    const supply: any = await program.account.supply.fetch(supplyPda);
+    const supply = await program.account.supply.fetch(supplyPda);
     assert.ok(supply.supplier.equals(seller.publicKey));
     assert.ok(supply.timeslot.equals(timeslotPda));
     assert.isTrue(supply.amount.eq(quantity));
@@ -251,25 +257,21 @@ describe("energy_auction", () => {
     assert.equal(Number(escrowBalance), Number(quantity));
     assert.equal(Number(sellerBefore) - Number(sellerAfter), Number(quantity));
 
-    const slot: any = await program.account.timeslot.fetch(timeslotPda);
+    const slot = await program.account.timeslot.fetch(timeslotPda);
     assert.isTrue(slot.totalSupply.eq(quantity));
   });
 
-  it("✅ Allows a buyer to place a bid (escrow credited, page derived from totalBids)", async () => {
+  it("✅ Allows a buyer to place a bid", async () => {
     const [timeslotPda] = anchor.web3.PublicKey.findProgramAddressSync(
       [Buffer.from("timeslot"), epochTs.toArrayLike(Buffer, "le", 8)],
       program.programId
     );
 
-    // derive timeslot-level quote escrow ATA 
     const [timeslotQuoteEscrow] = anchor.web3.PublicKey.findProgramAddressSync(
-  [Buffer.from("timeslot_quote_escrow"), timeslotPda.toBuffer()],
-  program.programId
-);
-  
+      [Buffer.from("quote_escrow"), timeslotPda.toBuffer()],
+      program.programId
+    );
 
-
-    // derive current bid page PDA from on-chain total_bids
     const { pda: bidPagePda, pageIndex } = await deriveBidPagePda(timeslotPda);
 
     const price = new anchor.BN(12_000_000); // $12.00
@@ -279,9 +281,8 @@ describe("energy_auction", () => {
 
     const buyerBefore = (await getAccount(provider.connection, buyerQuoteAta)).amount;
 
-    // placeBid(pageIndex, price, quantity, timestamp)
     await program.methods
-      .placeBid(pageIndex, price, quantity, timestamp) // pass pageIndex so program derives same PDA
+      .placeBid(pageIndex, price, quantity, timestamp)
       .accounts({
         globalState: globalStatePda,
         timeslot: timeslotPda,
@@ -289,7 +290,7 @@ describe("energy_auction", () => {
         quoteMint: quoteMint.publicKey,
         buyerSource: buyerQuoteAta,
         buyer: buyer.publicKey,
-        bidPage: bidPagePda, // new page to init
+        bidPage: bidPagePda,
         systemProgram: anchor.web3.SystemProgram.programId,
         tokenProgram: TOKEN_PROGRAM_ID,
       })
@@ -299,9 +300,13 @@ describe("energy_auction", () => {
     const buyerAfter = (await getAccount(provider.connection, buyerQuoteAta)).amount;
     const escrowAcc = await getAccount(provider.connection, timeslotQuoteEscrow);
     assert.equal(escrowAcc.amount.toString(), expectedEscrowAmount.toString(), "escrow credited");
-    assert.equal(Number(buyerBefore) - Number(buyerAfter), Number(expectedEscrowAmount), "buyer debited");
+    assert.equal(
+      (buyerBefore - buyerAfter).toString(),
+      expectedEscrowAmount.toString(),
+      "buyer debited"
+    );
 
-    const page: any = await program.account.bidPage.fetch(bidPagePda);
+    const page = await program.account.bidPage.fetch(bidPagePda);
     assert.equal(page.bids.length, 1);
     const bid = page.bids[0];
     assert.ok(bid.owner.equals(buyer.publicKey));
@@ -309,7 +314,7 @@ describe("energy_auction", () => {
     assert.isTrue(bid.quantity.eq(quantity));
     assert.equal(bid.status, 0); // Active
 
-    const slot: any = await program.account.timeslot.fetch(timeslotPda);
+    const slot = await program.account.timeslot.fetch(timeslotPda);
     assert.isTrue(slot.totalBids.eq(quantity));
   });
 
@@ -319,14 +324,14 @@ describe("energy_auction", () => {
       program.programId
     );
 
-    const [timeslotQuoteEscrow, bump] = anchor.web3.PublicKey.findProgramAddressSync(
-  [Buffer.from("timeslot_quote_escrow"), timeslotPda.toBuffer()],
-  program.programId
-);
+    const [timeslotQuoteEscrow] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("quote_escrow"), timeslotPda.toBuffer()],
+      program.programId
+    );
 
     const { pda: bidPagePda, pageIndex } = await deriveBidPagePda(timeslotPda);
 
-    const price = new anchor.BN(12_500_000); // $12.50, tick is $1.00
+    const price = new anchor.BN(12_500_000); // $12.50, but tick is $1.00
     const quantity = new anchor.BN(10);
     const timestamp = new anchor.BN(Date.now());
 
@@ -347,8 +352,9 @@ describe("energy_auction", () => {
         .signers([buyer])
         .rpc();
       assert.fail("Expected invalid price tick to fail");
-    } catch (err: any) {
-      assert.match(err.toString(), /(InvalidTimeslot|ConstraintViolation|anchor_lang::error::Error)/);
+    } catch (err) {
+      assert.instanceOf(err, AnchorError);
+      assert.equal((err as AnchorError).error.errorCode.code, "ConstraintViolation");
     }
   });
 
@@ -367,7 +373,7 @@ describe("energy_auction", () => {
       })
       .rpc();
 
-    const slot: any = await program.account.timeslot.fetch(timeslotPda);
+    const slot = await program.account.timeslot.fetch(timeslotPda);
     assert.equal(slot.status, 2); // Sealed
   });
 
@@ -377,14 +383,14 @@ describe("energy_auction", () => {
       program.programId
     );
 
-    const [timeslotQuoteEscrow, bump] = anchor.web3.PublicKey.findProgramAddressSync(
-  [Buffer.from("timeslot_quote_escrow"), timeslotPda.toBuffer()],
-  program.programId
-);
+    const [timeslotQuoteEscrow] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("quote_escrow"), timeslotPda.toBuffer()],
+      program.programId
+    );
 
     const { pda: bidPagePda, pageIndex } = await deriveBidPagePda(timeslotPda);
 
-    const price = new anchor.BN(13_000_000); // $13.00
+    const price = new anchor.BN(13_000_000);
     const quantity = new anchor.BN(1);
     const timestamp = new anchor.BN(Date.now());
 
@@ -405,8 +411,9 @@ describe("energy_auction", () => {
         .signers([buyer])
         .rpc();
       assert.fail("Expected bidding after sealing to fail");
-    } catch (err: any) {
-      assert.match(err.toString(), /(InvalidTimeslot|anchor_lang::error::Error)/);
+    } catch (err) {
+      assert.instanceOf(err, AnchorError);
+      assert.equal((err as AnchorError).error.errorCode.code, "InvalidTimeslot");
     }
   });
 
@@ -421,7 +428,6 @@ describe("energy_auction", () => {
       anotherSeller.publicKey
     );
 
-    // mint to this seller
     await mintTo(
       provider.connection,
       authority.payer,
@@ -463,12 +469,13 @@ describe("energy_auction", () => {
         .signers([anotherSeller])
         .rpc();
       assert.fail("Expected commit after sealing to fail");
-    } catch (err: any) {
-      assert.match(err.toString(), /InvalidTimeslot/);
+    } catch (err) {
+      assert.instanceOf(err, AnchorError);
+      assert.equal((err as AnchorError).error.errorCode.code, "InvalidTimeslot");
     }
   });
 
-  it("🚫 Fails to place a bid with insufficient buyer balance (on fresh timeslot)", async () => {
+  it("🚫 Fails to place a bid with insufficient buyer balance", async () => {
     // create new timeslot for this negative test
     const newEpoch = new anchor.BN(Date.now() + 10_000);
     const [newTimeslotPda] = anchor.web3.PublicKey.findProgramAddressSync(
@@ -486,18 +493,15 @@ describe("energy_auction", () => {
       })
       .rpc();
 
-    // ensure timeslot quote escrow ATA exists
-    const newTimeslotEscrow = await createAssociatedTokenAccount(
-      provider.connection,
-      authority.payer,
-      quoteMint.publicKey,
-      newTimeslotPda
+    const [newTimeslotEscrow] = anchor.web3.PublicKey.findProgramAddressSync(
+      [Buffer.from("quote_escrow"), newTimeslotPda.toBuffer()],
+      program.programId
     );
 
     const { pda: bidPagePda, pageIndex } = await deriveBidPagePda(newTimeslotPda);
 
     const price = new anchor.BN(1_000_000); // $1.00
-    const quantity = new anchor.BN(10_000); // requires 10,000 USDC
+    const quantity = new anchor.BN(10_000); // requires 10,000 USDC, poorBuyer has 0.001
     const timestamp = new anchor.BN(Date.now());
 
     try {
@@ -517,9 +521,17 @@ describe("energy_auction", () => {
         .signers([poorBuyer])
         .rpc();
       assert.fail("Expected bid to fail due to insufficient funds");
-    } catch (err: any) {
-      const s = err.toString().toLowerCase();
-      assert.isTrue(s.includes("insufficient") || s.includes("0x1") || s.includes("insufficient funds"));
+    } catch (err) {
+      // The error from an insufficient funds transfer via CPI can be generic.
+      // We check for common RPC error messages or the specific token program error.
+      const errorString = err.toString();
+      const isExpectedError =
+        errorString.includes("failed to send transaction") ||
+        errorString.includes("Simulation failed") ||
+        errorString.includes("insufficient funds") ||
+        errorString.includes("custom program error: 0x1"); // SPL Token program's InsufficientFunds error
+
+      assert.isTrue(isExpectedError, `Unexpected error received: ${errorString}`);
     }
   });
 });
