@@ -328,6 +328,104 @@ pub mod energy_auction {
         receipt.redeemed = true;
         Ok(())
     }
+    // 2. New instruction to calculate and store seller allocations
+pub fn calculate_seller_allocations(
+    ctx: Context<CalculateSellerAllocations>,
+    clearing_price: u64,
+    total_sold_quantity: u64,
+) -> Result<()> {
+    require_keys_eq!(
+        ctx.accounts.global_state.authority,
+        ctx.accounts.authority.key(),
+        EnergyAuctionError::InvalidAuthority
+    );
+    
+    let ts = &ctx.accounts.timeslot;
+    require!(matches!(ts.status(), TimeslotStatus::Settled), EnergyAuctionError::InvalidTimeslot);
+    
+    // This instruction processes ONE seller at a time
+    // Authority must call this for each seller in merit order (lowest reserve price first)
+    
+    let supply = &ctx.accounts.supply;
+    require!(supply.reserve_price <= clearing_price, EnergyAuctionError::ReservePriceNotMet);
+    
+    // Check remaining quantity to allocate (stored in timeslot or passed as remaining_context)
+    let remaining_to_allocate = ctx.accounts.remaining_allocation_tracker.remaining_quantity;
+    
+    let allocated_to_this_seller = std::cmp::min(supply.amount, remaining_to_allocate);
+    
+    let allocation = &mut ctx.accounts.seller_allocation;
+    allocation.supplier = supply.supplier;
+    allocation.timeslot = ts.key();
+    allocation.allocated_quantity = allocated_to_this_seller;
+    allocation.allocation_price = clearing_price;
+    allocation.proceeds_withdrawn = false;
+    allocation.bump = ctx.bumps.seller_allocation;
+    
+    // Update remaining tracker
+    ctx.accounts.remaining_allocation_tracker.remaining_quantity = 
+        remaining_to_allocate.checked_sub(allocated_to_this_seller)
+        .ok_or(EnergyAuctionError::MathError)?;
+    
+    Ok(())
+}
+
+// 3. Modified withdraw_proceeds to use allocations
+pub fn withdraw_proceeds_v2(ctx: Context<WithdrawProceedsV2>) -> Result<()> {
+    let ts = &ctx.accounts.timeslot;
+    let allocation = &mut ctx.accounts.seller_allocation;
+    let global_state = &ctx.accounts.global_state;
+    
+    require!(matches!(ts.status(), TimeslotStatus::Settled), EnergyAuctionError::InvalidTimeslot);
+    require!(!allocation.proceeds_withdrawn, EnergyAuctionError::AlreadyClaimed);
+    require_keys_eq!(allocation.supplier, ctx.accounts.seller.key(), EnergyAuctionError::Unauthorized);
+
+    // Calculate proceeds based on this seller's allocation
+    let gross_proceeds = (allocation.allocated_quantity as u128)
+        .checked_mul(allocation.allocation_price as u128)
+        .ok_or(EnergyAuctionError::MathError)?;
+
+    let protocol_fee = gross_proceeds
+        .checked_mul(global_state.fee_bps as u128)
+        .ok_or(EnergyAuctionError::MathError)?
+        .checked_div(10000)
+        .ok_or(EnergyAuctionError::MathError)?;
+    
+    let net_proceeds = gross_proceeds
+        .checked_sub(protocol_fee)
+        .ok_or(EnergyAuctionError::MathError)?;
+
+    // PDA signer seeds
+    let seeds = &[&b"timeslot"[..], &ts.epoch_ts.to_le_bytes(), &[ctx.bumps.timeslot]];
+    let signer_seeds = &[&seeds[..]];
+
+    // Transfer fee to the fee vault
+    let cpi_ctx_fee = CpiContext::new_with_signer(
+        ctx.accounts.token_program.to_account_info(),
+        Transfer {
+            from: ctx.accounts.timeslot_quote_escrow.to_account_info(),
+            to: ctx.accounts.fee_vault.to_account_info(),
+            authority: ts.to_account_info(),
+        },
+        signer_seeds,
+    );
+    token::transfer(cpi_ctx_fee, protocol_fee as u64)?;
+    
+    // Transfer net proceeds to the seller
+    let cpi_ctx_proceeds = CpiContext::new_with_signer(
+        ctx.accounts.token_program.to_account_info(),
+        Transfer {
+            from: ctx.accounts.timeslot_quote_escrow.to_account_info(),
+            to: ctx.accounts.seller_proceeds_ata.to_account_info(),
+            authority: ts.to_account_info(),
+        },
+        signer_seeds,
+    );
+    token::transfer(cpi_ctx_proceeds, net_proceeds as u64)?;
+
+    allocation.proceeds_withdrawn = true;
+    Ok(())
+}
 }
 
 ///////////////////////
@@ -588,7 +686,83 @@ pub struct RedeemEnergyAndRefund<'info> {
     pub buyer: Signer<'info>,
     pub token_program: Program<'info, Token>,
 }
+// 5. Context for the new allocation calculation
+#[derive(Accounts)]
+pub struct CalculateSellerAllocations<'info> {
+    pub global_state: Account<'info, GlobalState>,
+    #[account(
+        seeds = [b"timeslot", &timeslot.epoch_ts.to_le_bytes()],
+        bump,
+    )]
+    pub timeslot: Account<'info, Timeslot>,
+    
+    #[account(
+        seeds = [b"supply", timeslot.key().as_ref(), supply.supplier.as_ref()],
+        bump
+    )]
+    pub supply: Account<'info, Supply>,
+    
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + SellerAllocation::LEN,
+        seeds = [b"seller_allocation", timeslot.key().as_ref(), supply.supplier.as_ref()],
+        bump
+    )]
+    pub seller_allocation: Account<'info, SellerAllocation>,
+    
+    #[account(
+        mut,
+        seeds = [b"allocation_tracker", timeslot.key().as_ref()],
+        bump
+    )]
+    pub remaining_allocation_tracker: Account<'info, AllocationTracker>,
+    
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
 
+// 6. Updated context for withdraw_proceeds
+#[derive(Accounts)]
+pub struct WithdrawProceedsV2<'info> {
+    pub global_state: Account<'info, GlobalState>,
+    #[account(
+        seeds = [b"timeslot", &timeslot.epoch_ts.to_le_bytes()],
+        bump,
+    )]
+    pub timeslot: Account<'info, Timeslot>,
+    
+    #[account(
+        mut,
+        seeds = [b"seller_allocation", timeslot.key().as_ref(), seller.key().as_ref()],
+        bump,
+        constraint = seller_allocation.supplier == seller.key() @ EnergyAuctionError::Unauthorized
+    )]
+    pub seller_allocation: Account<'info, SellerAllocation>,
+    
+    #[account(
+        mut,
+        seeds = [b"quote_escrow", timeslot.key().as_ref()],
+        bump
+    )]
+    pub timeslot_quote_escrow: Account<'info, TokenAccount>,
+    
+    #[account(
+        mut,
+        seeds = [b"fee_vault"],
+        bump
+    )]
+    pub fee_vault: Account<'info, TokenAccount>,
+    
+    #[account(mut)]
+    pub seller_proceeds_ata: Account<'info, TokenAccount>,
+    
+    #[account(mut)]
+    pub seller: Signer<'info>,
+    
+    pub token_program: Program<'info, Token>,
+}
 
 ///////////////////////
 // Events
@@ -753,7 +927,31 @@ pub struct FeeVault {
 impl FeeVault {
     pub const LEN: usize = 1 + 32;
 }
+// 1. Add new state to track seller allocation results
+#[account]
+pub struct SellerAllocation {
+    pub supplier: Pubkey,
+    pub timeslot: Pubkey,
+    pub allocated_quantity: u64,  // How much this seller will sell
+    pub allocation_price: u64,    // Price this seller gets (usually clearing price)
+    pub proceeds_withdrawn: bool,
+    pub bump: u8,
+}
+// 4. Helper account to track remaining allocation during the process
+#[account]
+pub struct AllocationTracker {
+    pub timeslot: Pubkey,
+    pub remaining_quantity: u64,
+    pub total_allocated: u64,
+    pub bump: u8,
+}
 
+impl AllocationTracker {
+    pub const LEN: usize = 32 + 8 + 8 + 1;
+}
+impl SellerAllocation {
+    pub const LEN: usize = 32 + 32 + 8 + 8 + 1 + 1;
+}
 #[error_code]
 pub enum EnergyAuctionError {
     #[msg("Invalid authority for this operation")]
@@ -776,4 +974,8 @@ pub enum EnergyAuctionError {
     ConstraintViolation,
     #[msg("Proceeds or refund have already been claimed")]
     AlreadyClaimed,
+    #[msg("Seller's reserve price not met by clearing price")]
+    ReservePriceNotMet,
+    #[msg("No more quantity available for allocation")]
+    AllocationExhausted,
 }
