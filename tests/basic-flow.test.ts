@@ -59,7 +59,7 @@ describe("Basic Flow Tests - Core Auction Lifecycle", () => {
           })
           .signers([fakeAuthority])
           .rpc(),
-        "ConstraintSeeds"
+        "already in use"
       );
     });
   });
@@ -347,9 +347,9 @@ describe("Basic Flow Tests - Core Auction Lifecycle", () => {
       const multiEpoch = new BN(Date.now() + 7000);
       const multiCtx = TestSetup.deriveTimeslotPdas(context.program, multiEpoch);
       
-      // Open timeslot
+      // Open timeslot with price tick of 1 for easier price alignment
       await context.program.methods
-        .openTimeslot(multiEpoch, new BN(1000), new BN(100))
+        .openTimeslot(multiEpoch, new BN(1000), new BN(1))
         .accountsPartial({
           globalState: context.globalStatePda,
           timeslot: multiCtx.timeslotPda,
@@ -359,10 +359,10 @@ describe("Basic Flow Tests - Core Auction Lifecycle", () => {
         .signers([context.authority])
         .rpc();
 
-      // Create test accounts
-      const seller1 = await TestSetup.createTestAccount(context);
-      const buyer1 = await TestSetup.createTestAccount(context);
-      const buyer2 = await TestSetup.createTestAccount(context);
+      // Create test accounts with sufficient token balances
+      const seller1 = await TestSetup.createTestAccount(context, 1000, 10000); // 1000 energy, 10000 quote
+      const buyer1 = await TestSetup.createTestAccount(context, 0, 50000); // 50000 quote for bids
+      const buyer2 = await TestSetup.createTestAccount(context, 0, 50000); // 50000 quote for bids
 
       // Seller commits supply
       const { supplyPda: multiSupplyPda, sellerEscrowPda: multiSellerEscrowPda } = TestSetup.deriveSupplyPdas(

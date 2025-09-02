@@ -5,3 +5,6 @@ target
 node_modules
 test-ledger
 .yarn
+prompt2.md
+prompt.md
+plan.md
