@@ -162,12 +162,20 @@ describe("Integration Tests - End-to-End Workflows", () => {
         .signers([context.authority])
         .rpc();
 
+      // Derive price level PDA for bid processing
+      const priceLevelPda = anchor.web3.PublicKey.findProgramAddressSync(
+        [Buffer.from("price_level"), timeslotCtx.timeslotPda.toBuffer(), Buffer.alloc(8, 0)],
+        context.program.programId
+      )[0];
+
       await context.program.methods
         .processBidBatch(0, 0)
         .accountsPartial({
           globalState: context.globalStatePda,
           timeslot: timeslotCtx.timeslotPda,
           auctionState: timeslotCtx.auctionStatePda,
+          priceLevel: priceLevelPda,
+          payer: context.authority.publicKey,
         })
         .signers([context.authority])
         .rpc();
@@ -179,6 +187,8 @@ describe("Integration Tests - End-to-End Workflows", () => {
           globalState: context.globalStatePda,
           timeslot: timeslotCtx.timeslotPda,
           auctionState: timeslotCtx.auctionStatePda,
+          timeslotQuoteEscrow: timeslotCtx.quoteEscrowPda,
+          clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
         })
         .signers([context.authority])
         .rpc();
@@ -191,9 +201,13 @@ describe("Integration Tests - End-to-End Workflows", () => {
       console.log("✅ Multi-seller clearing price:", auctionState.clearingPrice.toString());
       console.log("✅ Total cleared quantity:", auctionState.totalClearedQuantity.toString());
 
+      // Get timeslot to check total supply
+      const timeslot = await context.program.account.timeslot.fetch(timeslotCtx.timeslotPda);
+      const actualSoldQuantity = Math.min(auctionState.totalClearedQuantity.toNumber(), timeslot.totalSupply.toNumber());
+      
       // Settlement
       await context.program.methods
-        .settleTimeslot(auctionState.clearingPrice, auctionState.totalClearedQuantity)
+        .settleTimeslot(auctionState.clearingPrice, new BN(actualSoldQuantity))
         .accountsPartial({
           globalState: context.globalStatePda,
           timeslot: timeslotCtx.timeslotPda,
@@ -271,7 +285,7 @@ describe("Integration Tests - End-to-End Workflows", () => {
 
   describe("Delivery Verification & Slashing", () => {
     it("✅ Handles delivery verification workflow", async () => {
-      const deliveryEpoch = new BN(Date.now() + 5000);
+      const deliveryEpoch = new BN(Date.now() - 3600000); // Start epoch 1 hour ago to ensure we're within 24-hour delivery window
       const deliveryCtx = TestSetup.deriveTimeslotPdas(context.program, deliveryEpoch);
 
       // Setup auction with seller
@@ -308,11 +322,11 @@ describe("Integration Tests - End-to-End Workflows", () => {
         .rpc();
 
       // Place a bid to create the quote escrow account
-      const buyer = await TestSetup.createTestAccount(context, 10_000_000, 10_000_000);
+      const buyer = await TestSetup.createTestAccount(context, 1_000_000_000, 1_000_000_000);
       const bidPagePda = TestSetup.deriveBidPagePda(context.program, deliveryCtx.timeslotPda, 0);
       
       await context.program.methods
-        .placeBid(0, new BN(6_000_000), new BN(100), new BN(Date.now()))
+        .placeBid(0, new BN(1_000_000), new BN(100), new BN(Date.now()))
         .accountsPartial({
           globalState: context.globalStatePda,
           timeslot: deliveryCtx.timeslotPda,
@@ -351,7 +365,7 @@ describe("Integration Tests - End-to-End Workflows", () => {
         .signers([context.authority])
         .rpc();
 
-      // Verify auction clearing to transition to Settled status
+      // Verify auction clearing 
       await context.program.methods
         .verifyAuctionClearing()
         .accountsPartial({
@@ -360,6 +374,34 @@ describe("Integration Tests - End-to-End Workflows", () => {
           auctionState: deliveryCtx.auctionStatePda,
           timeslotQuoteEscrow: deliveryCtx.quoteEscrowPda,
           clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([context.authority])
+        .rpc();
+
+
+      // Get auction state for settlement values
+      const auctionStateForSettlement = await context.program.account.auctionState.fetch(deliveryCtx.auctionStatePda);
+      const timeslotForSettlement = await context.program.account.timeslot.fetch(deliveryCtx.timeslotPda);
+      
+      console.log("Settlement values:");
+      console.log("- Clearing price:", auctionStateForSettlement.clearingPrice.toString());
+      console.log("- Total cleared quantity:", auctionStateForSettlement.totalClearedQuantity.toString());
+      console.log("- Timeslot total supply:", timeslotForSettlement.totalSupply.toString());
+      
+      // Cap the total sold quantity to not exceed timeslot total supply
+      const cappedTotalSoldQuantity = auctionStateForSettlement.totalClearedQuantity.gt(timeslotForSettlement.totalSupply) 
+        ? timeslotForSettlement.totalSupply 
+        : auctionStateForSettlement.totalClearedQuantity;
+      
+      console.log("- Capped total sold quantity:", cappedTotalSoldQuantity.toString());
+      
+      // Settle timeslot to transition to Settled status (required for delivery verification)
+      await context.program.methods
+        .settleTimeslot(auctionStateForSettlement.clearingPrice, cappedTotalSoldQuantity)
+        .accountsPartial({
+          globalState: context.globalStatePda,
+          timeslot: deliveryCtx.timeslotPda,
+          authority: context.authority.publicKey,
         })
         .signers([context.authority])
         .rpc();
@@ -398,14 +440,16 @@ describe("Integration Tests - End-to-End Workflows", () => {
       }
 
       // Mock delivery verification with correct structure
+      // Use a timestamp that's within the delivery window (between epoch and epoch + 24 hours)
+      const deliveryTimestamp = deliveryEpoch.add(new BN(3600)); // 1 hour after epoch start
       const deliveryReport = {
         supplier: sellers[0].keypair.publicKey,
         timeslot: deliveryCtx.timeslotPda,
         allocatedQuantity: new BN(100),
-        deliveredQuantity: new BN(80), // Delivered only 80 kWh
-        evidenceHash: Array.from(Buffer.alloc(32, 1)),
-        timestamp: new BN(Date.now()),
-        oracleSignature: Array.from(Buffer.alloc(64, 1)),
+        deliveredQuantity: new BN(100),
+        evidenceHash: Array.from(Buffer.from("delivery_evidence_hash_123", "utf8")),
+        timestamp: deliveryEpoch, // Use exact epoch timestamp to ensure within delivery window
+        oracleSignature: new Array(64).fill(0),
       };
 
       const { slashingStatePda } = TestSetup.deriveSlashingPdas(
@@ -416,60 +460,70 @@ describe("Integration Tests - End-to-End Workflows", () => {
 
       const oracle = await TestSetup.createTestAccount(context, 0, 0);
 
-      // Create seller allocations for each seller
-      for (let i = 0; i < sellers.length; i++) {
-        const seller = sellers[i];
-        const sellerAllocationPda = TestSetup.deriveSellerAllocationPda(
-          context.program,
-          deliveryCtx.timeslotPda,
-          seller.keypair.publicKey
-        );
-
-        // Check if seller allocation already exists
-        const allocationExists = await TestSetup.checkAccountExists(context.program, sellerAllocationPda);
-        
-        if (!allocationExists) {
-          // Get supply PDA for this seller and create supply first
-          const supplyPda = TestSetup.deriveSupplyPda(context.program, deliveryCtx.timeslotPda, seller.keypair.publicKey);
-          const { sellerEscrowPda } = TestSetup.deriveSupplyPdas(
-            context.program,
-            deliveryCtx.timeslotPda,
-            seller.keypair.publicKey
-          );
-          
-          // Create supply commitment first
-          await context.program.methods
-            .commitSupply(deliveryCtx.epoch, new BN(100), new BN(1000))
-            .accountsPartial({
-              globalState: context.globalStatePda,
-              timeslot: deliveryCtx.timeslotPda,
-              supply: supplyPda,
-              energyMint: context.energyMint.publicKey,
-              tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID,
-              systemProgram: anchor.web3.SystemProgram.programId,
-              signer: seller.keypair.publicKey,
-              sellerSource: seller.energyAta,
-              sellerEscrow: sellerEscrowPda,
-            })
-            .signers([seller.keypair])
-            .rpc();
-            
-          // Now calculate seller allocations
-          await context.program.methods
-            .calculateSellerAllocations(new BN(100), new BN(1000)) // clearingPrice, totalSoldQuantity
-            .accountsPartial({
-              globalState: context.globalStatePda,
-              timeslot: deliveryCtx.timeslotPda,
-              sellerAllocation: sellerAllocationPda,
-              supply: supplyPda,
-              remainingAllocationTracker: deliveryCtx.allocationTrackerPda,
-              authority: context.authority.publicKey,
-              systemProgram: anchor.web3.SystemProgram.programId,
-            })
-            .signers([context.authority])
-            .rpc();
-        }
+      // Check if allocation tracker already exists before initializing
+      const trackerExists = await TestSetup.checkAccountExists(context.program, deliveryCtx.allocationTrackerPda);
+      
+      if (!trackerExists) {
+        // Initialize allocation tracker AFTER settlement
+        await context.program.methods
+          .initAllocationTracker()
+          .accountsPartial({
+            globalState: context.globalStatePda,
+            timeslot: deliveryCtx.timeslotPda,
+            allocationTracker: deliveryCtx.allocationTrackerPda,
+            authority: context.authority.publicKey,
+            systemProgram: anchor.web3.SystemProgram.programId,
+          })
+          .signers([context.authority])
+          .rpc();
       }
+
+      // Create seller allocation for the seller who committed supply (sellers[0])
+      const seller = sellers[0];
+      const deliveryAllocationPda = TestSetup.deriveSellerAllocationPda(
+        context.program,
+        deliveryCtx.timeslotPda,
+        seller.keypair.publicKey
+      );
+
+      // Check if seller allocation already exists
+      const allocationExists = await TestSetup.checkAccountExists(context.program, deliveryAllocationPda);
+      
+      if (!allocationExists) {
+        // Get supply PDA for this seller (should already exist from earlier commitSupply)
+        const supplyPda = TestSetup.deriveSupplyPda(context.program, deliveryCtx.timeslotPda, seller.keypair.publicKey);
+        
+        // Calculate seller allocations using settlement values
+        await context.program.methods
+          .calculateSellerAllocations(auctionStateForSettlement.clearingPrice, auctionStateForSettlement.totalClearedQuantity)
+          .accountsPartial({
+            globalState: context.globalStatePda,
+            timeslot: deliveryCtx.timeslotPda,
+            sellerAllocation: deliveryAllocationPda,
+            supply: supplyPda,
+            remainingAllocationTracker: deliveryCtx.allocationTrackerPda,
+            authority: context.authority.publicKey,
+            systemProgram: anchor.web3.SystemProgram.programId,
+          })
+          .signers([context.authority])
+          .rpc();
+      }
+
+      // Verify timeslot is in Settled status
+      const timeslotForDelivery = await context.program.account.timeslot.fetch(deliveryCtx.timeslotPda);
+      console.log("Timeslot status for delivery verification:", timeslotForDelivery.status);
+      
+      if (timeslotForDelivery.status !== 3) { // Not Settled status
+        console.log("ERROR: Timeslot not in Settled status for delivery verification. Status:", timeslotForDelivery.status);
+        throw new Error(`Timeslot must be in Settled status (3) for delivery verification, but got status: ${timeslotForDelivery.status}`);
+      }
+
+      // Get seller allocation PDA for delivery verification
+      const deliverySellerAllocationPda = TestSetup.deriveSellerAllocationPda(
+        context.program,
+        deliveryCtx.timeslotPda,
+        sellers[0].keypair.publicKey
+      );
 
       await context.program.methods
         .verifyDeliveryConfirmation(deliveryReport, TestSetup.generateMockOracleSignature())
@@ -477,7 +531,7 @@ describe("Integration Tests - End-to-End Workflows", () => {
           globalState: context.globalStatePda,
           timeslot: deliveryCtx.timeslotPda,
           slashingState: slashingStatePda,
-          sellerAllocation: sellerAllocationPda,
+          sellerAllocation: deliverySellerAllocationPda,
           supplier: sellers[0].keypair.publicKey,
           authority: context.authority.publicKey,
           oracle: context.authority.publicKey,

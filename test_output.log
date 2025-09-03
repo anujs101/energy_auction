@@ -1,0 +1,203 @@
+warning: use of deprecated method `anchor_lang::prelude::AccountInfo::<'a>::realloc`: Use AccountInfo::resize() instead
+   --> programs/energy_auction/src/lib.rs:124:1
+    |
+124 | #[program]
+    | ^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+    = note: this warning originates in the attribute macro `program` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `bump`
+  --> programs/energy_auction/src/lib.rs:13:5
+   |
+13 |     bump: u8,
+   |     ^^^^ help: if this is intentional, prefix it with an underscore: `_bump`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `oracle_signature`
+    --> programs/energy_auction/src/lib.rs:1549:9
+     |
+1549 |         oracle_signature: [u8; 64],
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_oracle_signature`
+
+warning: `energy_auction` (lib) generated 3 warnings
+    Finished `release` profile [optimized] target(s) in 0.43s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.41s
+     Running unittests src/lib.rs (/Users/anujs101/Desktop/energy_auction/target/debug/deps/energy_auction-15571efe0d1bcbd6)
+
+Found a 'test' script in the Anchor.toml. Running it as a test suite!
+
+Running test suite: "/Users/anujs101/Desktop/energy_auction/Anchor.toml"
+
+yarn run v1.22.22
+$ /Users/anujs101/Desktop/energy_auction/node_modules/.bin/ts-mocha -p ./tsconfig.json -t 1000000 'tests/**/*.ts'
+(node:15487) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///Users/anujs101/Desktop/energy_auction/tests/basic-flow.test.ts is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to /Users/anujs101/Desktop/energy_auction/package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+  Basic Flow Tests - Core Auction Lifecycle
+Initializing global state with quoteMint: 6s1ttUp9By8Z2dEXj7GzkKDvsMcnCJppSmtdvvQztc9S
+✅ Global state initialized successfully
+    1. Protocol Initialization
+      ✔ ✅ Initializes global state
+      ✔ 🚫 Fails unauthorized initialization (470ms)
+    2. Complete Auction Flow
+      ✔ ✅ Executes full auction lifecycle (2314ms)
+      ✔ ✅ Handles empty auction gracefully (925ms)
+    3. Error Handling
+      ✔ 🚫 Prevents operations on invalid timeslot states
+      ✔ 🚫 Validates price tick alignment (475ms)
+    4. State Invariant Verification
+      ✔ ✅ Maintains energy conservation (915ms)
+      ✔ ✅ Maintains financial conservation (913ms)
+    5. Multi-Actor Scenarios
+      ✔ ✅ Handles multiple sellers and buyers (8358ms)
+
+  Edge Cases Tests - Boundary & Stress Testing
+GlobalState already initialized, skipping initialization
+    Empty Auction Scenarios
+      ✔ ✅ Handles auction with no supply (1848ms)
+      ✔ ✅ Handles auction with no bids (1382ms)
+    Maximum Resource Limits
+      ✔ 🚫 Validates maximum bid page limits (943ms)
+      ✔ 🚫 Validates extreme parameter values (463ms)
+    Malformed Input Handling
+      ✔ 🚫 Rejects invalid mint accounts (478ms)
+      ✔ 🚫 Validates account discriminators (454ms)
+    Concurrent Access Scenarios
+      ✔ ✅ Handles simultaneous bid placements (2781ms)
+    Network Stress Scenarios
+      ✔ ✅ Handles maximum sellers per timeslot (24180ms)
+    Price Boundary Testing
+      ✔ 🚫 Rejects bids below minimum price (494ms)
+      ✔ 🚫 Validates reserve price constraints (912ms)
+    Recovery Mechanisms
+      1) ✅ Recovers from failed auction clearing
+
+  Emergency Controls Tests - System Resilience
+GlobalState already initialized, skipping initialization
+    Emergency Pause/Resume
+      ✔ ✅ Emergency pause by authority (461ms)
+      ✔ 🚫 Blocks operations during pause (467ms)
+      ✔ ✅ Emergency resume by authority (931ms)
+    Emergency Withdrawals
+      2) ✅ Executes emergency withdrawal
+      ✔ 🚫 Prevents unauthorized emergency withdrawal (1878ms)
+    System Health Monitoring
+      ✔ ✅ Validates system health (925ms)
+
+  Governance Tests - DAO Functionality
+GlobalState already initialized, skipping initialization
+    Proposal Creation
+      ✔ ✅ Creates parameter change proposal (459ms)
+      ✔ 🚫 Fails unauthorized proposal creation
+    Voting Mechanism
+      ✔ ✅ Casts vote successfully (462ms)
+Proposal status before execution: 3
+Proposal type: { feeBps: {} }
+      3) ✅ Executes approved proposal
+
+  Integration Tests - End-to-End Workflows
+GlobalState already initialized, skipping initialization
+    Multi-Seller Multi-Buyer Auction
+      4) ✅ Executes complex auction with merit order
+    Cross-Timeslot Coordination
+      ✔ ✅ Handles multiple concurrent timeslots (2798ms)
+    Delivery Verification & Slashing
+      5) ✅ Handles delivery verification workflow
+    Auction Cancellation & Refunds
+      ✔ ✅ Cancels auction and processes refunds (2821ms)
+    Real-World Usage Patterns
+      ✔ ✅ Simulates daily energy trading cycle (3773ms)
+
+  Security Tests - Access Control & Safety
+GlobalState already initialized, skipping initialization
+    Authority Access Controls
+      ✔  Prevents unauthorized timeslot opening
+      ✔  Validates signer requirements (457ms)
+    Numerical Safety
+      ✔  Prevents overflow in calculations (462ms)
+      ✔  Validates zero quantity constraints (471ms)
+    State Manipulation Prevention
+      ✔  Prevents double supply commitment (923ms)
+
+
+  35 passing (2m)
+  5 failing
+
+  1) Edge Cases Tests - Boundary & Stress Testing
+       Recovery Mechanisms
+         ✅ Recovers from failed auction clearing:
+     Error: AnchorError thrown in programs/energy_auction/src/lib.rs:547. Error Code: SettlementVerificationFailed. Error Number: 6020. Error Message: Settlement verification failed.
+      at AnchorError.parse (node_modules/@coral-xyz/anchor/src/error.ts:152:14)
+      at translateError (node_modules/@coral-xyz/anchor/src/error.ts:277:35)
+      at MethodsBuilder.rpc [as _rpcFn] (node_modules/@coral-xyz/anchor/src/program/namespace/rpc.ts:35:29)
+      at processTicksAndRejections (node:internal/process/task_queues:105:5)
+
+  2) Emergency Controls Tests - System Resilience
+       Emergency Withdrawals
+         ✅ Executes emergency withdrawal:
+     Simulation failed. 
+Message: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x1. 
+Logs: 
+[
+  "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA success",
+  "Program 11111111111111111111111111111111 invoke [2]",
+  "Program 11111111111111111111111111111111 success",
+  "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [2]",
+  "Program log: Instruction: Transfer",
+  "Program log: Error: insufficient funds",
+  "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA consumed 4300 of 168630 compute units",
+  "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA failed: custom program error: 0x1",
+  "Program 5jcCqhVXRebbuCMVeRtm18FQiNiWUrQBdxkevyCWLCE7 consumed 35670 of 200000 compute units",
+  "Program 5jcCqhVXRebbuCMVeRtm18FQiNiWUrQBdxkevyCWLCE7 failed: custom program error: 0x1"
+]. 
+Catch the `SendTransactionError` and call `getLogs()` on it for full details.
+  
+
+  3) Governance Tests - DAO Functionality
+       Voting Mechanism
+         ✅ Executes approved proposal:
+     Error: AnchorError thrown in programs/energy_auction/src/lib.rs:2384. Error Code: TimelockNotExpired. Error Number: 6039. Error Message: Timelock period has not expired.
+      at AnchorError.parse (node_modules/@coral-xyz/anchor/src/error.ts:152:14)
+      at translateError (node_modules/@coral-xyz/anchor/src/error.ts:277:35)
+      at MethodsBuilder.rpc [as _rpcFn] (node_modules/@coral-xyz/anchor/src/program/namespace/rpc.ts:35:29)
+      at processTicksAndRejections (node:internal/process/task_queues:105:5)
+
+  4) Integration Tests - End-to-End Workflows
+       Multi-Seller Multi-Buyer Auction
+         ✅ Executes complex auction with merit order:
+     Error: AnchorError thrown in programs/energy_auction/src/lib.rs:287. Error Code: AuctionInProgress. Error Number: 6015. Error Message: Auction already in progress.
+      at AnchorError.parse (node_modules/@coral-xyz/anchor/src/error.ts:152:14)
+      at translateError (node_modules/@coral-xyz/anchor/src/error.ts:277:35)
+      at MethodsBuilder.rpc [as _rpcFn] (node_modules/@coral-xyz/anchor/src/program/namespace/rpc.ts:35:29)
+      at processTicksAndRejections (node:internal/process/task_queues:105:5)
+
+  5) Integration Tests - End-to-End Workflows
+       Delivery Verification & Slashing
+         ✅ Handles delivery verification workflow:
+     Simulation failed. 
+Message: Transaction simulation failed: Error processing Instruction 0: custom program error: 0x1. 
+Logs: 
+[
+  "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA success",
+  "Program 11111111111111111111111111111111 invoke [2]",
+  "Program 11111111111111111111111111111111 success",
+  "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [2]",
+  "Program log: Instruction: Transfer",
+  "Program log: Error: insufficient funds",
+  "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA consumed 4300 of 171630 compute units",
+  "Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA failed: custom program error: 0x1",
+  "Program 5jcCqhVXRebbuCMVeRtm18FQiNiWUrQBdxkevyCWLCE7 consumed 32670 of 200000 compute units",
+  "Program 5jcCqhVXRebbuCMVeRtm18FQiNiWUrQBdxkevyCWLCE7 failed: custom program error: 0x1"
+]. 
+Catch the `SendTransactionError` and call `getLogs()` on it for full details.
+  
+
+
+
+error Command failed with exit code 5.
+info Visit https://yarnpkg.com/en/docs/cli/run for documentation about this command.

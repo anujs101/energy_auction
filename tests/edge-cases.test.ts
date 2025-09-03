@@ -574,6 +574,8 @@ describe("Edge Cases Tests - Boundary & Stress Testing", () => {
           globalState: context.globalStatePda,
           timeslot: timeslotCtx.timeslotPda,
           auctionState: timeslotCtx.auctionStatePda,
+          timeslotQuoteEscrow: timeslotCtx.quoteEscrowPda,
+          clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
         })
         .signers([context.authority])
         .rpc();
