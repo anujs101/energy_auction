@@ -44,9 +44,6 @@ describe("Integration Tests - End-to-End Workflows", () => {
 
   describe("Multi-Seller Multi-Buyer Auction", () => {
     it("✅ Executes complex auction with merit order", async () => {
-      // Skip this test to avoid auction_state AccountNotInitialized errors
-      console.log("Skipping complex auction test - auction_state initialization conflicts");
-      return;
       const epoch = new BN(Date.now() + 1000);
       const timeslotCtx = TestSetup.deriveTimeslotPdas(context.program, epoch);
 
@@ -274,9 +271,6 @@ describe("Integration Tests - End-to-End Workflows", () => {
 
   describe("Delivery Verification & Slashing", () => {
     it("✅ Handles delivery verification workflow", async () => {
-      // Skip this test to avoid ConstraintSeeds violations
-      console.log("Skipping delivery verification test - ConstraintSeeds PDA mismatch");
-      return;
       const deliveryEpoch = new BN(Date.now() + 5000);
       const deliveryCtx = TestSetup.deriveTimeslotPdas(context.program, deliveryEpoch);
 
@@ -313,7 +307,27 @@ describe("Integration Tests - End-to-End Workflows", () => {
         .signers([sellers[0].keypair])
         .rpc();
 
-      // Seal and settle
+      // Place a bid to create the quote escrow account
+      const buyer = await TestSetup.createTestAccount(context, 10_000_000, 10_000_000);
+      const bidPagePda = TestSetup.deriveBidPagePda(context.program, deliveryCtx.timeslotPda, 0);
+      
+      await context.program.methods
+        .placeBid(0, new BN(6_000_000), new BN(100), new BN(Date.now()))
+        .accountsPartial({
+          globalState: context.globalStatePda,
+          timeslot: deliveryCtx.timeslotPda,
+          timeslotQuoteEscrow: deliveryCtx.quoteEscrowPda,
+          quoteMint: context.quoteMint.publicKey,
+          buyerSource: buyer.quoteAta,
+          buyer: buyer.keypair.publicKey,
+          bidPage: bidPagePda,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([buyer.keypair])
+        .rpc();
+
+      // Seal timeslot
       await context.program.methods
         .sealTimeslot()
         .accountsPartial({
@@ -323,13 +337,31 @@ describe("Integration Tests - End-to-End Workflows", () => {
         })
         .rpc();
 
+      // Execute auction clearing to create auction_state
       await context.program.methods
-        .settleTimeslot(new BN(6_000_000), new BN(100))
+        .executeAuctionClearing()
         .accountsPartial({
           globalState: context.globalStatePda,
           timeslot: deliveryCtx.timeslotPda,
-          authority: context.authority.publicKey,
+          auctionState: deliveryCtx.auctionStatePda,
+          payer: context.authority.publicKey,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
         })
+        .signers([context.authority])
+        .rpc();
+
+      // Verify auction clearing to transition to Settled status
+      await context.program.methods
+        .verifyAuctionClearing()
+        .accountsPartial({
+          globalState: context.globalStatePda,
+          timeslot: deliveryCtx.timeslotPda,
+          auctionState: deliveryCtx.auctionStatePda,
+          timeslotQuoteEscrow: deliveryCtx.quoteEscrowPda,
+          clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([context.authority])
         .rpc();
 
       // Initialize allocation tracker first
@@ -399,6 +431,11 @@ describe("Integration Tests - End-to-End Workflows", () => {
         if (!allocationExists) {
           // Get supply PDA for this seller and create supply first
           const supplyPda = TestSetup.deriveSupplyPda(context.program, deliveryCtx.timeslotPda, seller.keypair.publicKey);
+          const { sellerEscrowPda } = TestSetup.deriveSupplyPdas(
+            context.program,
+            deliveryCtx.timeslotPda,
+            seller.keypair.publicKey
+          );
           
           // Create supply commitment first
           await context.program.methods
@@ -412,7 +449,7 @@ describe("Integration Tests - End-to-End Workflows", () => {
               systemProgram: anchor.web3.SystemProgram.programId,
               signer: seller.keypair.publicKey,
               sellerSource: seller.energyAta,
-              sellerEscrow: seller.energyAta,
+              sellerEscrow: sellerEscrowPda,
             })
             .signers([seller.keypair])
             .rpc();

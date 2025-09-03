@@ -103,6 +103,19 @@ describe("Emergency Controls Tests - System Resilience", () => {
     it("✅ Executes emergency withdrawal", async () => {
       const amount = new BN(1000);
       
+      // First activate emergency pause
+      const reason = Array.from(Buffer.from("Emergency withdrawal test", "utf8")).concat(Array(64 - "Emergency withdrawal test".length).fill(0));
+      await context.program.methods
+        .emergencyPause(reason)
+        .accountsPartial({
+          globalState: context.globalStatePda,
+          emergencyState: context.emergencyStatePda,
+          authority: context.authority.publicKey,
+          clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([context.authority])
+        .rpc();
+      
       // Create a mock timeslot for emergency withdrawal
       const mockEpoch = new BN(Date.now());
       const mockTimeslotCtx = TestSetup.deriveTimeslotPdas(context.program, mockEpoch);
@@ -118,16 +131,42 @@ describe("Emergency Controls Tests - System Resilience", () => {
         })
         .rpc();
       
-      // Skip this test to avoid emergency state account conflicts
-      console.log("Skipping emergency withdrawal test - emergency state shared across tests");
-      return;
+      // Place a bid to create the quote escrow account
+      const testBuyer = await TestSetup.createTestAccount(context, 1_000_000, 1_000_000);
+      const bidPagePda = TestSetup.deriveBidPagePda(context.program, mockTimeslotCtx.timeslotPda, 0);
       
       await context.program.methods
-        .emergencyWithdraw(amount, { stuckFunds: {} })
+        .placeBid(0, new BN(1_000_000), new BN(100), new BN(Date.now()))
         .accountsPartial({
           globalState: context.globalStatePda,
           timeslot: mockTimeslotCtx.timeslotPda,
-          sourceAccount: context.authorityQuoteAta,
+          timeslotQuoteEscrow: mockTimeslotCtx.quoteEscrowPda,
+          quoteMint: context.quoteMint.publicKey,
+          buyerSource: testBuyer.quoteAta,
+          buyer: testBuyer.keypair.publicKey,
+          bidPage: bidPagePda,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([testBuyer.keypair])
+        .rpc();
+      
+      // Cancel the auction to enable emergency withdrawal
+      await context.program.methods
+        .cancelAuction()
+        .accountsPartial({
+          globalState: context.globalStatePda,
+          timeslot: mockTimeslotCtx.timeslotPda,
+          authority: context.authority.publicKey,
+        })
+        .rpc();
+      
+      await context.program.methods
+        .emergencyWithdraw(amount, { cancelledAuction: {} })
+        .accountsPartial({
+          globalState: context.globalStatePda,
+          timeslot: mockTimeslotCtx.timeslotPda,
+          sourceAccount: mockTimeslotCtx.quoteEscrowPda,
           destinationAccount: context.authorityQuoteAta,
           emergencyState: context.emergencyStatePda,
           authority: context.authority.publicKey,

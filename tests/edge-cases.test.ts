@@ -487,9 +487,6 @@ describe("Edge Cases Tests - Boundary & Stress Testing", () => {
 
   describe("Recovery Mechanisms", () => {
     it("✅ Recovers from failed auction clearing", async () => {
-      // Skip this test to avoid auction_state AccountNotInitialized errors
-      console.log("Skipping recovery test - auction_state initialization conflicts");
-      return;
       const epoch = new BN(Date.now() + 11000);
       const timeslotCtx = TestSetup.deriveTimeslotPdas(context.program, epoch);
 
@@ -556,7 +553,7 @@ describe("Edge Cases Tests - Boundary & Stress Testing", () => {
         .signers([context.authority])
         .rpc();
 
-      // Initialize auction state before rollback with proper account creation
+      // Initialize auction state by executing auction clearing
       await context.program.methods
         .executeAuctionClearing()
         .accountsPartial({
@@ -570,7 +567,7 @@ describe("Edge Cases Tests - Boundary & Stress Testing", () => {
         .signers([context.authority])
         .rpc();
 
-      // Now verify auction clearing
+      // Verify auction clearing to complete the process
       await context.program.methods
         .verifyAuctionClearing()
         .accountsPartial({
@@ -581,7 +578,7 @@ describe("Edge Cases Tests - Boundary & Stress Testing", () => {
         .signers([context.authority])
         .rpc();
 
-      // Should handle failed clearing gracefully
+      // Now rollback the failed auction (auction_state exists now)
       await context.program.methods
         .rollbackFailedAuction()
         .accounts({
