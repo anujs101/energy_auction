@@ -100,7 +100,7 @@ describe("Governance Tests - DAO Functionality", () => {
           proposalId,
           { feeBps: {} },
           new BN(300),
-          TestSetup.createDescriptionBuffer("Unauthorized proposal")
+          TestSetup.createDescriptionBuffer("Emergency proposal")
         )
         .accountsPartial({
           globalState: context.globalStatePda,
@@ -115,146 +115,44 @@ describe("Governance Tests - DAO Functionality", () => {
     });
 
     it("✅ Casts vote successfully", async () => {
-      // Skip this test to avoid ConstraintSeeds violations
-      console.log("Skipping vote test - ConstraintSeeds PDA mismatch");
-      return;
-      
-      // Use the same proposal ID as creation test to avoid ConstraintSeeds
-      const proposalId = new BN(1); // Fixed ID for consistency
-      const { proposalPda, voteRecordPda } = TestSetup.deriveGovernancePdas(context.program, proposalId, context.authority.publicKey);
+      const { voteRecordPda } = TestSetup.deriveGovernancePdas(context.program, new BN(3), context.authority.publicKey);
 
-      // Check if proposal already exists
-      let proposalExists = false;
-      try {
-        await context.program.account.governanceProposal.fetch(proposalPda);
-        proposalExists = true;
-      } catch (error) {
-        // Proposal doesn't exist, create it
-      }
-
-      if (!proposalExists) {
-        // Create proposal
-        await context.program.methods
-          .proposeParameterChange(
-            proposalId,
-            { feeBps: {} },
-            new BN(200),
-            TestSetup.createDescriptionBuffer("Test proposal for voting")
-          )
-          .accountsPartial({
-            globalState: context.globalStatePda,
-            proposal: proposalPda,
-            proposer: context.authority.publicKey,
-            proposerStake: context.authorityQuoteAta,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
-          })
-          .signers([context.authority])
-          .rpc();
-      }
-
-      // Check if vote record already exists
-      let voteExists = false;
-      try {
-        await context.program.account.voteRecord.fetch(voteRecordPda!);
-        voteExists = true;
-      } catch (error) {
-        // Vote record doesn't exist, create it
-      }
-
-      if (!voteExists) {
-        // Vote on the proposal using the original PDA
-        await context.program.methods
-          .voteOnProposal({ for: {} }, new BN(1000))
-          .accountsPartial({
-            globalState: context.globalStatePda,
-            proposal: proposalPda, // Use original PDA for voting
-            voteRecord: voteRecordPda,
-            voter: context.authority.publicKey,
-            voterStake: context.authorityQuoteAta,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
-          })
-          .signers([context.authority])
-          .rpc();
-      }
-
-      const voteRecord = await context.program.account.voteRecord.fetch(voteRecordPda!);
-      assert.equal(Object.keys(voteRecord.vote)[0], 'for'); // Vote.FOR
-      assert.isTrue(voteRecord.votingPower.eq(new BN(1000)));
-    });
-
-    it("✅ Executes approved proposal", async () => {
-      // Skip this test to avoid ConstraintSeeds violations
-      console.log("Skipping proposal execution test - ConstraintSeeds PDA mismatch");
-      return;
-      
-      // Use the same proposal ID as voting test to avoid ConstraintSeeds
-      const proposalId = new BN(1); // Same ID as voting test
-      const { proposalPda } = TestSetup.deriveGovernancePdas(context.program, proposalId);
-
-      // Check if proposal already exists
-      let proposalExists = false;
-      try {
-        await context.program.account.governanceProposal.fetch(proposalPda);
-        proposalExists = true;
-      } catch (error) {
-        // Proposal doesn't exist, create it
-      }
-
-      if (!proposalExists) {
-        // Create proposal
-        await context.program.methods
-          .proposeParameterChange(
-            proposalId,
-            { emergencyParameterChange: {} },
-            new BN(250),
-            TestSetup.createDescriptionBuffer("Emergency test proposal")
-          )
-          .accountsPartial({
-            globalState: context.globalStatePda,
-            proposal: proposalPda,
-            proposer: context.authority.publicKey,
-            proposerStake: context.authorityQuoteAta,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
-          })
-          .signers([context.authority])
-          .rpc();
-
-        // Vote on the proposal
-        const { voteRecordPda } = TestSetup.deriveGovernancePdas(context.program, proposalId, context.authority.publicKey);
-        
-        await context.program.methods
-          .voteOnProposal({ for: {} }, new BN(1000))
-          .accountsPartial({
-            globalState: context.globalStatePda,
-            proposal: proposalPda,
-            voteRecord: voteRecordPda,
-            voter: context.authority.publicKey,
-            voterStake: context.authorityQuoteAta,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
-          })
-          .signers([context.authority])
-          .rpc();
-      }
-
-      // Execute the proposal using the same PDA used for creation
       await context.program.methods
-        .executeProposal()
+        .voteOnProposal({ for: {} }, new BN(1000))
         .accountsPartial({
           globalState: context.globalStatePda,
-          proposal: proposalPda, // Use same PDA as creation
-          authority: context.authority.publicKey,
+          proposal: proposalPda,
+          voteRecord: voteRecordPda,
+          voter: context.authority.publicKey,
+          voterStake: context.authorityQuoteAta,
+          systemProgram: anchor.web3.SystemProgram.programId,
           clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
         })
         .signers([context.authority])
         .rpc();
 
-      // Verify proposal was executed by checking global state change
-      const state = await context.program.account.globalState.fetch(context.globalStatePda);
-      assert.equal(state.feeBps, 250);
+      const voteRecord = await context.program.account.voteRecord.fetch(voteRecordPda!);
+      assert.equal(Object.keys(voteRecord.vote)[0], 'for');
+      assert.isTrue(voteRecord.votingPower.eq(new BN(1000)));
+    });
+
+    it("✅ Executes approved proposal", async () => {
+      // Wait for voting to complete (voting period is 1s for emergency)
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      await context.program.methods
+        .executeProposal()
+        .accountsPartial({
+          globalState: context.globalStatePda,
+          proposal: proposalPda,
+          authority: context.authority.publicKey, // Authority required to execute
+          clock: anchor.web3.SYSVAR_CLOCK_PUBKEY,
+        })
+        .signers([context.authority])
+        .rpc();
+
+      const globalState = await context.program.account.globalState.fetch(context.globalStatePda);
+      assert.equal(globalState.feeBps, 300);
     });
   });
 });
