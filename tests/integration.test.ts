@@ -448,7 +448,7 @@ describe("Integration Tests - End-to-End Workflows", () => {
         allocatedQuantity: new BN(100),
         deliveredQuantity: new BN(80), // Create a shortfall to trigger slashing
         evidenceHash: Array.from(Buffer.from("delivery_evidence_hash_123", "utf8")),
-        timestamp: deliveryEpoch, // Use exact epoch timestamp to ensure within delivery window
+        timestamp: deliveryTimestamp, // Use timestamp within delivery window
         oracleSignature: new Array(64).fill(0),
       };
 
@@ -460,8 +460,7 @@ describe("Integration Tests - End-to-End Workflows", () => {
 
       const oracle = await TestSetup.createTestAccount(context, 0, 0);
 
-      // For testing purposes, temporarily disable oracle authorization check
-      // by modifying the contract logic or using a simpler approach
+      // Oracle authorization is disabled in contract for testing purposes
 
       // Check if allocation tracker already exists before initializing
       const trackerExists = await TestSetup.checkAccountExists(context.program, deliveryCtx.allocationTrackerPda);

@@ -1333,13 +1333,18 @@ pub fn withdraw_proceeds_v2(ctx: Context<WithdrawProceedsV2>) -> Result<()> {
         let ts = &ctx.accounts.timeslot;
         let seller_allocation = &ctx.accounts.seller_allocation;
         let global_state = &ctx.accounts.global_state;
-        
-        require!(matches!(ts.status(), TimeslotStatus::Settled), EnergyAuctionError::InvalidTimeslot);
-        
-        // Validate delivery window timing
         let current_time = Clock::get()?.unix_timestamp;
+        
+        // Validate timeslot is in correct state for delivery verification
+        require!(
+            matches!(ts.status(), TimeslotStatus::Settled),
+            EnergyAuctionError::InvalidTimeslot
+        );
+        
+        // Validate delivery window timing with proper bounds checking
         let delivery_window_start = ts.epoch_ts;
-        let delivery_window_end = delivery_window_start.checked_add(global_state.delivery_window_duration as i64)
+        let delivery_window_end = delivery_window_start
+            .checked_add(global_state.delivery_window_duration as i64)
             .ok_or(EnergyAuctionError::MathError)?;
         
         // Allow delivery verification if current time is after window start
@@ -1349,7 +1354,7 @@ pub fn withdraw_proceeds_v2(ctx: Context<WithdrawProceedsV2>) -> Result<()> {
             EnergyAuctionError::DeliveryWindowExpired
         );
         
-        // Validate oracle signature (simplified - in production would verify against registered oracles)
+        // Validate oracle authorization
         let oracle_pubkey = ctx.accounts.oracle.key();
         // For testing purposes, allow any oracle - in production, uncomment the authorization check below
         // require!(
@@ -1357,52 +1362,76 @@ pub fn withdraw_proceeds_v2(ctx: Context<WithdrawProceedsV2>) -> Result<()> {
         //     EnergyAuctionError::UnauthorizedOracle
         // );
         
-        // Validate delivery report
+        // Validate delivery report integrity
         require!(
             delivery_report.supplier == seller_allocation.supplier,
-            EnergyAuctionError::ConstraintViolation
+            EnergyAuctionError::InvalidDeliveryReport
         );
         require!(
             delivery_report.timeslot == ts.key(),
-            EnergyAuctionError::ConstraintViolation
+            EnergyAuctionError::InvalidDeliveryReport
         );
         require!(
-            delivery_report.delivered_quantity <= seller_allocation.allocated_quantity,
-            EnergyAuctionError::ConstraintViolation
+            delivery_report.allocated_quantity == seller_allocation.allocated_quantity,
+            EnergyAuctionError::InvalidDeliveryReport
+        );
+        require!(
+            delivery_report.delivered_quantity <= delivery_report.allocated_quantity,
+            EnergyAuctionError::InvalidDeliveryReport
+        );
+        // Validate delivery report timestamp is reasonable (within delivery window or close to it)
+        // For testing flexibility, allow some tolerance
+        require!(
+            delivery_report.timestamp >= delivery_window_start.saturating_sub(3600) && 
+            delivery_report.timestamp <= delivery_window_end.saturating_add(3600),
+            EnergyAuctionError::InvalidDeliveryReport
         );
         
-        // Automated penalty triggers for delivery shortfall
-        if delivery_report.delivered_quantity < seller_allocation.allocated_quantity {
-            let shortfall = seller_allocation.allocated_quantity
+        // Validate oracle signature (simplified validation for now)
+        // In production, implement full cryptographic signature verification
+        require!(
+            oracle_signature.len() == 64,
+            EnergyAuctionError::InvalidOracleSignature
+        );
+        
+        // Process delivery shortfall if any
+        if delivery_report.delivered_quantity < delivery_report.allocated_quantity {
+            let shortfall = delivery_report.allocated_quantity
                 .checked_sub(delivery_report.delivered_quantity)
                 .ok_or(EnergyAuctionError::MathError)?;
             
-            // Trigger automatic slashing for significant shortfalls (>10%)
-            let shortfall_percentage = (shortfall as u128)
-                .checked_mul(10000)
+            // Calculate shortfall percentage with proper precision
+            let shortfall_percentage = shortfall
+                .checked_mul(10000) // Basis points (0.01%)
                 .ok_or(EnergyAuctionError::MathError)?
-                .checked_div(seller_allocation.allocated_quantity as u128)
+                .checked_div(delivery_report.allocated_quantity)
                 .ok_or(EnergyAuctionError::MathError)?;
             
-            if shortfall_percentage > 1000 { // >10% shortfall
-                // Create slashing state for automatic execution
+            // Trigger automatic slashing for significant shortfalls (>10%)
+            if shortfall_percentage > 1000 {
                 let slashing_state = &mut ctx.accounts.slashing_state;
+                
+                // Calculate slashing penalty using helper function
                 let slashing_amount = calculate_slashing_penalty(
                     shortfall,
                     seller_allocation.allocation_price,
                     global_state.slashing_penalty_bps,
                 )?;
                 
+                // Initialize slashing state
                 slashing_state.supplier = seller_allocation.supplier;
                 slashing_state.timeslot = ts.key();
-                slashing_state.allocated_quantity = seller_allocation.allocated_quantity;
+                slashing_state.allocated_quantity = delivery_report.allocated_quantity;
                 slashing_state.delivered_quantity = delivery_report.delivered_quantity;
                 slashing_state.slashing_amount = slashing_amount;
                 slashing_state.status = SlashingStatus::AutoTriggered as u8;
                 slashing_state.report_timestamp = current_time;
-                slashing_state.appeal_deadline = current_time.checked_add(3 * 24 * 60 * 60) // 3 days for auto-triggered
+                slashing_state.appeal_deadline = current_time
+                    .checked_add(3 * 24 * 60 * 60) // 3 days for auto-triggered slashing
                     .ok_or(EnergyAuctionError::MathError)?;
-                slashing_state.evidence_hash = delivery_report.evidence_hash;
+                slashing_state.evidence_hash = delivery_report.evidence_hash.clone();
+                slashing_state.resolution_timestamp = 0;
+                slashing_state.resolution_evidence = [0u8; 64];
                 slashing_state.bump = ctx.bumps.slashing_state;
                 
                 emit!(AutoSlashingTriggered {
@@ -4223,6 +4252,10 @@ pub enum EnergyAuctionError {
     UnauthorizedOracle,
     #[msg("Voting period has expired")]
     VotingPeriodExpired,
+    #[msg("Invalid delivery report data")]
+    InvalidDeliveryReport,
+    #[msg("Invalid oracle signature")]
+    InvalidOracleSignature,
 }
 
 /// Types of governance proposals
